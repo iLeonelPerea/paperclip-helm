@@ -1,0 +1,30 @@
+apiVersion: v1
+entries:
+  paperclip:
+  - annotations:
+      artifacthub.io/license: MIT
+    apiVersion: v2
+    appVersion: latest
+    created: "2026-04-15T02:25:45.63782491Z"
+    description: Production-ready Paperclip AI agent orchestration platform for Kubernetes
+    digest: 669274638520c4ccfccebdbcdf3fa7dfdaa2aebf636f7795106688e6d25fda06
+    home: https://github.com/paperclipai/paperclip
+    icon: https://github.com/paperclipai/paperclip/raw/master/ui/public/favicon.ico
+    keywords:
+    - paperclip
+    - ai-agents
+    - orchestration
+    - llm
+    - node
+    - kubernetes
+    maintainers:
+    - name: ileonelperea
+      url: https://github.com/ileonelperea
+    name: paperclip
+    sources:
+    - https://github.com/paperclipai/paperclip
+    type: application
+    urls:
+    - https://iLeonelPerea.github.io/paperclip-helm/charts/paperclip-0.1.0.tgz
+    version: 0.1.0
+generated: "2026-04-15T02:25:45.636713355Z"
