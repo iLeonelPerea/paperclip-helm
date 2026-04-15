@@ -6,7 +6,6 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "paperclip.labels" . | nindent 4 }}
-    app.kubernetes.io/name: {{ include "paperclip.name" . }}
     app.kubernetes.io/component: postgres
 spec:
   type: ClusterIP

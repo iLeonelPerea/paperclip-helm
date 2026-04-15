@@ -6,7 +6,6 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "paperclip.labels" . | nindent 4 }}
-    app.kubernetes.io/name: {{ include "paperclip.name" . }}
     app.kubernetes.io/component: postgres
 spec:
   replicas: 1
@@ -20,7 +19,6 @@ spec:
     metadata:
       labels:
         {{- include "paperclip.labels" . | nindent 8 }}
-        app.kubernetes.io/name: {{ include "paperclip.name" . }}
         app.kubernetes.io/component: postgres
     spec:
       dnsConfig:

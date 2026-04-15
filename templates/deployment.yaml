@@ -5,7 +5,6 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "paperclip.labels" . | nindent 4 }}
-    {{- include "paperclip.selectorLabels" . | nindent 4 }}
   {{- if .Values.reloader.enabled }}
   annotations:
     reloader.stakater.com/auto: "true"
@@ -19,7 +18,6 @@ spec:
     metadata:
       labels:
         {{- include "paperclip.labels" . | nindent 8 }}
-        {{- include "paperclip.selectorLabels" . | nindent 8 }}
       annotations:
         {{- include "paperclip.checksumAnnotations" . | nindent 8 }}
     spec:
