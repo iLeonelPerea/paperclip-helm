@@ -1,0 +1,58 @@
+# =============================================================================
+# Paperclip - Production Values Override (OVH K8s + Traefik)
+# Usage: helm upgrade --install paperclip . -f values.yaml -f values-prod.yaml
+# =============================================================================
+
+image:
+  tag: "latest"
+  pullPolicy: Always
+
+config:
+  deploymentMode: authenticated
+  deploymentExposure: private
+  publicURL: "https://paperclip.YOURDOMAIN.com"
+
+ingress:
+  enabled: true
+  ingressClassName: traefik
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+  host: "paperclip.YOURDOMAIN.com"
+  tls:
+    - secretName: paperclip-tls
+      hosts:
+        - paperclip.YOURDOMAIN.com
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+persistence:
+  enabled: true
+  size: 10Gi
+
+postgresql:
+  persistence:
+    size: 20Gi
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 512Mi
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+networkPolicy:
+  enabled: true
+
+reloader:
+  enabled: true

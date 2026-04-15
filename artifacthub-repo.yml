@@ -1,0 +1,15 @@
+# ArtifactHub repository metadata
+# This file must be in the root of the gh-pages branch (or main for single-chart repos)
+# To get your repositoryID:
+#   1. Sign in at https://artifacthub.io with your GitHub account
+#   2. Go to Control Panel → Add repository
+#   3. Add repo URL: https://USERNAME.github.io/paperclip-helm
+#   4. Copy the repositoryID shown after creation
+#
+# IMPORTANT: Replace the repositoryID below with the one from ArtifactHub after registering the repo
+
+repositoryID: ""  # TODO: Get from https://artifacthub.io/control-panel after registering
+
+owners:
+  - name: ileonelperea
+    email: ""  # TODO: Replace with your contact email

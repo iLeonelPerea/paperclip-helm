@@ -1,0 +1,214 @@
+# =============================================================================
+# Paperclip Helm Chart - Configuration Values
+# =============================================================================
+
+# -- Override chart name
+nameOverride: ""
+# -- Override full release name
+fullnameOverride: ""
+# -- Timezone for all containers (e.g., "UTC", "America/Mexico_City")
+timezone: "UTC"
+
+# -- Image configuration
+image:
+  repository: paperclipai/paperclip
+  tag: "latest"
+  pullPolicy: IfNotPresent
+  # -- Image pull secrets (for private registries)
+  pullSecrets: []
+
+# -- Number of replicas (Paperclip is stateful via /paperclip PVC, keep 1 unless RWX storage)
+replicaCount: 1
+
+# =============================================================================
+# Service
+# =============================================================================
+service:
+  type: ClusterIP
+  port: 3100
+  annotations: {}
+
+# =============================================================================
+# Ingress (Traefik)
+# =============================================================================
+ingress:
+  enabled: false
+  # -- IngressClass name (e.g., traefik, nginx, gce)
+  ingressClassName: traefik
+  annotations: {}
+    # traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    # traefik.ingress.kubernetes.io/router.tls: "true"
+  host: "paperclip.example.com"
+  tls: []
+  # tls:
+  #   - secretName: paperclip-tls
+  #     hosts:
+  #       - paperclip.example.com
+
+# =============================================================================
+# Resources
+# =============================================================================
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+# =============================================================================
+# Persistence - /paperclip volume (agent configs, conversation state)
+# =============================================================================
+persistence:
+  enabled: true
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 5Gi
+
+# =============================================================================
+# Application Configuration
+# =============================================================================
+config:
+  # -- Server port (must match service.port)
+  port: 3100
+  # -- Serve built React UI alongside the API
+  serveUI: true
+  # -- Deployment mode: "authenticated" (login required) | "open" (no auth)
+  deploymentMode: authenticated
+  # -- Network exposure: "private" | "public"
+  deploymentExposure: private
+  # -- Public URL used for OAuth callbacks, links in the UI, etc.
+  # Set to your ingress host URL in production
+  publicURL: "http://localhost:3100"
+
+# =============================================================================
+# Authentication Secret (BETTER_AUTH_SECRET)
+# =============================================================================
+auth:
+  # -- Secret value for BetterAuth (random string, min 32 chars)
+  # Leave empty to use existingSecret
+  betterAuthSecret: ""
+  # -- Name of existing Secret containing the auth secret key
+  existingSecret: ""
+  # -- Key name within the existing secret
+  existingSecretKey: "better-auth-secret"
+
+# =============================================================================
+# PostgreSQL (embedded, optional)
+# =============================================================================
+postgresql:
+  # -- Deploy embedded PostgreSQL. Set to false to use externalDatabase
+  enabled: true
+  image:
+    repository: postgres
+    tag: "17-alpine"
+    pullPolicy: IfNotPresent
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 10Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  auth:
+    database: paperclip
+    username: paperclip
+    # -- PostgreSQL password. Leave empty to auto-generate, or use existingSecret
+    password: ""
+    # -- Use existing secret for PostgreSQL credentials (keys: username, password, database)
+    existingSecret: ""
+
+# =============================================================================
+# External Database (when postgresql.enabled=false)
+# =============================================================================
+externalDatabase:
+  # -- Full PostgreSQL connection string: postgresql://user:pass@host:5432/db
+  url: ""
+  # -- Use existing secret for DATABASE_URL (key defined by existingSecretKey)
+  existingSecret: ""
+  existingSecretKey: "database-url"
+
+# =============================================================================
+# Vault & External Secrets Operator (ESO) Integration
+# =============================================================================
+# When vault.enabled=true:
+# - Chart creates ClusterSecretStore pointing to Vault
+# - Chart creates ExternalSecret resources to pull secrets
+# - Prerequisites: ESO must be pre-installed; Vault KV v2 must have secrets at {mount}/paperclip/*
+vault:
+  enabled: false
+  address: "http://vault.vault.svc.cluster.local:8200"
+  tlsSkipVerify: false
+  role: "paperclip"
+  mount: "paperclip"
+  authPath: "kubernetes"
+  serviceAccount: "paperclip-vault-auth"
+  namespace: "vault"
+  refreshInterval: "1h"
+  # -- Retain or Delete K8s Secrets when ExternalSecret is deleted
+  deletionPolicy: "Retain"
+
+# =============================================================================
+# Security Contexts
+# =============================================================================
+podSecurityContext:
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# =============================================================================
+# Scheduling
+# =============================================================================
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# =============================================================================
+# ServiceAccount
+# =============================================================================
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# =============================================================================
+# Horizontal Pod Autoscaler (not recommended for stateful Paperclip)
+# =============================================================================
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+
+# =============================================================================
+# Pod Disruption Budget
+# =============================================================================
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+# =============================================================================
+# NetworkPolicy
+# =============================================================================
+networkPolicy:
+  enabled: false
+
+# =============================================================================
+# Reloader (Stakater) - auto-restart pods on ConfigMap/Secret changes
+# =============================================================================
+reloader:
+  enabled: false

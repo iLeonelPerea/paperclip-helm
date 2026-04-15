@@ -1,0 +1,100 @@
+{{- if .Values.postgresql.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "paperclip.postgresServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "paperclip.labels" . | nindent 4 }}
+    app.kubernetes.io/name: {{ include "paperclip.name" . }}
+    app.kubernetes.io/component: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "paperclip.name" . }}
+      app.kubernetes.io/component: postgres
+  strategy:
+    type: Recreate  # important for stateful single-replica postgres
+  template:
+    metadata:
+      labels:
+        {{- include "paperclip.labels" . | nindent 8 }}
+        app.kubernetes.io/name: {{ include "paperclip.name" . }}
+        app.kubernetes.io/component: postgres
+    spec:
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "1"
+      securityContext:
+        fsGroup: 999
+        runAsUser: 999
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: "{{ .Values.postgresql.image.repository }}:{{ .Values.postgresql.image.tag }}"
+          imagePullPolicy: {{ .Values.postgresql.image.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "paperclip.dbSecretName" . }}
+                  key: database
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "paperclip.dbSecretName" . }}
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "paperclip.dbSecretName" . }}
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER"
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.postgresql.resources | nindent 12 }}
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+              subPath: pgdata
+      volumes:
+        - name: postgres-data
+          {{- if .Values.postgresql.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "paperclip.postgresServiceName" . }}-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+{{- end }}

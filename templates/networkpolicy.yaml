@@ -1,0 +1,84 @@
+{{- if .Values.networkPolicy.enabled }}
+---
+# NetworkPolicy: Paperclip server
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "paperclip.fullname" . }}-server
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "paperclip.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "paperclip.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow traffic to the server on port 3100 from within the cluster
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}
+  egress:
+    # Allow server -> postgres
+    {{- if .Values.postgresql.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "paperclip.name" . }}
+              app.kubernetes.io/component: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- end }}
+    # Allow DNS resolution
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow HTTPS to external AI APIs (Claude, OpenAI)
+    - ports:
+        - protocol: TCP
+          port: 443
+---
+{{- if .Values.postgresql.enabled }}
+# NetworkPolicy: PostgreSQL
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "paperclip.fullname" . }}-postgres
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "paperclip.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "paperclip.name" . }}
+      app.kubernetes.io/component: postgres
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow ONLY paperclip server -> postgres
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "paperclip.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: server
+      ports:
+        - protocol: TCP
+          port: 5432
+  egress:
+    # DNS only
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}
+{{- end }}

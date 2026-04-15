@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "paperclip.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "paperclip.labels" . | nindent 4 }}
+data:
+  PORT: {{ .Values.config.port | quote }}
+  SERVE_UI: {{ .Values.config.serveUI | quote }}
+  PAPERCLIP_DEPLOYMENT_MODE: {{ .Values.config.deploymentMode | quote }}
+  PAPERCLIP_DEPLOYMENT_EXPOSURE: {{ .Values.config.deploymentExposure | quote }}
+  PAPERCLIP_PUBLIC_URL: {{ .Values.config.publicURL | quote }}
+  NODE_ENV: "production"
+  TZ: {{ .Values.timezone | default "UTC" | quote }}

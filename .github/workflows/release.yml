@@ -1,0 +1,242 @@
+name: Release Chart
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      # ── 1. Helm Lint ─────────────────────────────────────────────────────────
+      - name: Helm Lint
+        run: helm lint .
+
+      # ── 2. Template render — defaults ────────────────────────────────────────
+      - name: Helm Template (defaults)
+        run: |
+          helm template paperclip . > /tmp/rendered-defaults.yaml
+          echo "Rendered $(wc -l < /tmp/rendered-defaults.yaml) lines (defaults)"
+
+      # ── 3. Template render — todas las features habilitadas ──────────────────
+      - name: Helm Template (all features enabled)
+        run: |
+          helm template paperclip . \
+            --set ingress.enabled=true \
+            --set ingress.host=paperclip.example.com \
+            --set networkPolicy.enabled=true \
+            --set podDisruptionBudget.enabled=true \
+            --set autoscaling.enabled=true \
+            --set reloader.enabled=true \
+            > /tmp/rendered-all-features.yaml
+          echo "Rendered $(wc -l < /tmp/rendered-all-features.yaml) lines (all features)"
+
+      # ── 4. Template render — external database (sin PostgreSQL embebido) ─────
+      - name: Helm Template (external database)
+        run: |
+          helm template paperclip . \
+            --set postgresql.enabled=false \
+            --set externalDatabase.url="postgresql://user:pass@external-db:5432/paperclip" \
+            > /tmp/rendered-external-db.yaml
+          echo "Rendered $(wc -l < /tmp/rendered-external-db.yaml) lines (external db)"
+
+      # ── 5. Template render — vault/ESO enabled ───────────────────────────────
+      - name: Helm Template (vault enabled)
+        run: |
+          helm template paperclip . \
+            --set vault.enabled=true \
+            --set vault.address="http://vault.vault.svc.cluster.local:8200" \
+            > /tmp/rendered-vault.yaml
+          echo "Rendered $(wc -l < /tmp/rendered-vault.yaml) lines (vault)"
+
+      # ── 6. Merge rendered files for schema validation ─────────────────────────
+      - name: Merge renders for validation
+        run: |
+          cat /tmp/rendered-defaults.yaml > /tmp/rendered-all.yaml
+          echo "---" >> /tmp/rendered-all.yaml
+          cat /tmp/rendered-all-features.yaml >> /tmp/rendered-all.yaml
+
+      # ── 7. Kubeconform (schema validation) ───────────────────────────────────
+      - name: Install kubeconform
+        run: |
+          curl -sL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz
+          sudo mv kubeconform /usr/local/bin/
+
+      - name: Kubeconform (schema validation)
+        run: cat /tmp/rendered-defaults.yaml | kubeconform -strict -summary
+
+      # ── 8. Kube-score (best practices) ───────────────────────────────────────
+      - name: Install kube-score
+        run: |
+          curl -sL https://github.com/zegl/kube-score/releases/download/v1.20.0/kube-score_1.20.0_linux_amd64.tar.gz | tar xz
+          sudo mv kube-score /usr/local/bin/
+
+      - name: Kube-score (best practices)
+        continue-on-error: true
+        run: cat /tmp/rendered-defaults.yaml | kube-score score - --output-format ci
+
+      # ── 9. Pluto (deprecated APIs) ───────────────────────────────────────────
+      - name: Install pluto
+        run: |
+          PLUTO_VERSION=$(curl -s https://api.github.com/repos/FairwindsOps/pluto/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+          curl -sL "https://github.com/FairwindsOps/pluto/releases/download/${PLUTO_VERSION}/pluto_${PLUTO_VERSION#v}_linux_amd64.tar.gz" | tar xz
+          sudo mv pluto /usr/local/bin/
+
+      - name: Pluto (deprecated APIs)
+        run: cat /tmp/rendered-defaults.yaml | pluto detect -
+
+      # ── 10. Trivy (misconfigurations) ─────────────────────────────────────────
+      - name: Trivy (misconfigurations)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: /tmp/rendered-defaults.yaml
+          severity: CRITICAL
+          exit-code: 1
+
+      # ── 11. Chart Testing Lint ────────────────────────────────────────────────
+      - name: Chart Testing Lint
+        uses: helm/chart-testing-action@v2.7.0
+
+      - run: ct lint --charts . --validate-maintainers=false
+
+  # ── RELEASE JOB ──────────────────────────────────────────────────────────────
+  release:
+    needs: validate
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Get chart version
+        id: chart
+        run: |
+          echo "version=$(grep '^version:' Chart.yaml | awk '{print $2}')" >> $GITHUB_OUTPUT
+          echo "name=$(grep '^name:' Chart.yaml | awk '{print $2}')" >> $GITHUB_OUTPUT
+
+      - name: Check if release already exists
+        id: check_release
+        run: |
+          VERSION="${{ steps.chart.outputs.version }}"
+          if gh release view "v${VERSION}" &>/dev/null; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Release v${VERSION} already exists, skipping"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Release v${VERSION} does not exist, will create"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Package chart
+        if: steps.check_release.outputs.exists == 'false'
+        run: |
+          helm package .
+          mkdir -p .cr-release-packages
+          mv *.tgz .cr-release-packages/
+
+      - name: Create GitHub Release
+        if: steps.check_release.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.chart.outputs.version }}
+          name: ${{ steps.chart.outputs.name }}-${{ steps.chart.outputs.version }}
+          files: .cr-release-packages/*.tgz
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rebuild gh-pages index from scratch
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.chart.outputs.version }}"
+          CHART_NAME="${{ steps.chart.outputs.name }}"
+          REPO="${{ github.repository }}"
+          BASE_URL="https://${{ github.repository_owner }}.github.io/paperclip-helm/charts"
+
+          WORK_DIR=$(mktemp -d)
+          mkdir -p "${WORK_DIR}/charts"
+
+          echo "=== Downloading chart packages from all releases ==="
+          for tag in $(gh release list --limit 100 --json tagName -q '.[].tagName' | sort -V); do
+            echo "Processing release ${tag}..."
+            gh release download "${tag}" \
+              --pattern "*.tgz" \
+              --dir "${WORK_DIR}/charts/" 2>/dev/null || {
+              echo "  WARN: No .tgz in release ${tag}, skipping"
+              continue
+            }
+            echo "  OK"
+          done
+
+          CURRENT_TGZ="${WORK_DIR}/charts/${CHART_NAME}-${VERSION}.tgz"
+          if [ ! -f "${CURRENT_TGZ}" ]; then
+            echo "WARN: Current version not found, packaging from source..."
+            helm package . --destination "${WORK_DIR}/charts/"
+          fi
+
+          echo "=== Packages collected ==="
+          ls -la "${WORK_DIR}/charts/"
+
+          echo "=== Generating index.yaml ==="
+          helm repo index "${WORK_DIR}/charts" --url "${BASE_URL}"
+
+          ENTRIES=$(grep -c 'version:' "${WORK_DIR}/charts/index.yaml" || echo "0")
+          echo "Found ${ENTRIES} chart version(s)"
+
+          if [ "${ENTRIES}" -eq 0 ]; then
+            echo "ERROR: index.yaml has no entries!"
+            exit 1
+          fi
+
+          # Switch to gh-pages
+          git stash --include-untracked || true
+          if git rev-parse --verify origin/gh-pages &>/dev/null; then
+            git checkout gh-pages
+            rm -rf charts index.yaml
+          else
+            git checkout --orphan gh-pages
+            git rm -rf . 2>/dev/null || true
+          fi
+
+          mkdir -p charts
+          cp "${WORK_DIR}/charts/"*.tgz charts/
+          cp "${WORK_DIR}/charts/index.yaml" .
+
+          git checkout main -- artifacthub-repo.yml 2>/dev/null || true
+
+          git add index.yaml charts/ artifacthub-repo.yml 2>/dev/null || true
+          git commit -m "Release v${VERSION}: rebuild index with $(ls charts/*.tgz | wc -l) chart(s)" || echo "No changes to commit"
+          git push origin gh-pages
+
+          rm -rf "${WORK_DIR}"
+          echo "=== Done ==="
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

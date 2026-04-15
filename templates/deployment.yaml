@@ -1,0 +1,144 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "paperclip.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "paperclip.labels" . | nindent 4 }}
+    {{- include "paperclip.selectorLabels" . | nindent 4 }}
+  {{- if .Values.reloader.enabled }}
+  annotations:
+    reloader.stakater.com/auto: "true"
+  {{- end }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "paperclip.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "paperclip.labels" . | nindent 8 }}
+        {{- include "paperclip.selectorLabels" . | nindent 8 }}
+      annotations:
+        {{- include "paperclip.checksumAnnotations" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "paperclip.serviceAccountName" . }}
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "1"
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.postgresql.enabled }}
+      initContainers:
+        - name: wait-for-postgres
+          image: "busybox:1.36"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for PostgreSQL at {{ include "paperclip.postgresServiceName" . }}:5432..."
+              MAX=60
+              i=0
+              while [ $i -lt $MAX ]; do
+                if nc -zw2 {{ include "paperclip.postgresServiceName" . }} 5432 2>/dev/null; then
+                  echo "PostgreSQL is ready!"
+                  exit 0
+                fi
+                i=$((i+1))
+                echo "Attempt $i/$MAX: not ready, retrying in 5s..."
+                sleep 5
+              done
+              echo "ERROR: PostgreSQL did not become ready in time"
+              exit 1
+      {{- end }}
+      containers:
+        - name: paperclip
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.config.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "paperclip.fullname" . }}-config
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "paperclip.dbSecretName" . }}
+                  {{- if .Values.externalDatabase.existingSecret }}
+                  key: {{ .Values.externalDatabase.existingSecretKey }}
+                  {{- else }}
+                  key: database-url
+                  {{- end }}
+            - name: BETTER_AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "paperclip.secretName" . }}
+                  key: {{ .Values.auth.existingSecretKey | default "better-auth-secret" }}
+          startupProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: paperclip-data
+              mountPath: /paperclip
+      volumes:
+        - name: paperclip-data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "paperclip.fullname" . }}-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}

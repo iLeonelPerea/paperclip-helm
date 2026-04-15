@@ -1,0 +1,29 @@
+HELP! Paperclip AI Agent Orchestrator has been deployed!
+
+Release: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+{{- if .Values.ingress.enabled }}
+  Access URL: https://{{ .Values.ingress.host }}
+{{- else }}
+  Port-forward to access locally:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "paperclip.fullname" . }} 3100:3100
+  Then open: http://localhost:3100
+{{- end }}
+
+{{- if .Values.postgresql.enabled }}
+  PostgreSQL: embedded ({{ include "paperclip.postgresServiceName" . }}:5432)
+{{- else }}
+  PostgreSQL: external
+{{- end }}
+
+{{- if .Values.vault.enabled }}
+  Secrets: managed by Vault/ESO ({{ .Values.vault.address }})
+{{- else }}
+  Secrets: managed by Kubernetes Secrets
+{{- end }}
+
+IMPORTANT: On first install, set a strong BETTER_AUTH_SECRET (min 32 chars):
+  --set auth.betterAuthSecret="$(openssl rand -base64 32)"
+
+Or use Vault/ESO integration by setting vault.enabled=true.

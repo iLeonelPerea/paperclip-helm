@@ -1,0 +1,20 @@
+# Helm default
+.helmignore
+*.lock
+*.bak
+*.tmp
+.DS_Store
+.git/
+.gitignore
+.github/
+docs/
+*.md
+!README.md
+# Sensitive files
+values-*.yaml
+!values.yaml
+vault-root-token*.json
+*.env
+.env*
+# Tests
+tests/
