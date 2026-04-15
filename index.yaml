@@ -5,7 +5,7 @@ entries:
       artifacthub.io/license: MIT
     apiVersion: v2
     appVersion: latest
-    created: "2026-04-15T02:34:30.215770234Z"
+    created: "2026-04-15T23:18:47.658123566Z"
     description: Production-ready Paperclip AI agent orchestration platform for Kubernetes
     digest: 669274638520c4ccfccebdbcdf3fa7dfdaa2aebf636f7795106688e6d25fda06
     home: https://github.com/paperclipai/paperclip
@@ -27,4 +27,4 @@ entries:
     urls:
     - https://iLeonelPerea.github.io/paperclip-helm/charts/paperclip-0.1.0.tgz
     version: 0.1.0
-generated: "2026-04-15T02:34:30.214570307Z"
+generated: "2026-04-15T23:18:47.656263298Z"
