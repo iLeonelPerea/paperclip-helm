@@ -1,23 +1,19 @@
 # =============================================================================
-# Paperclip Helm Chart - Configuration Values
+# Paperclip Helm Chart - OVH Production Values
+# Cluster: kubernetes-admin@services  |  Namespace: platform
+# Storage: csi-cinder-high-speed (OVH Cinder default)
 # =============================================================================
 
-# -- Override chart name
 nameOverride: ""
-# -- Override full release name
 fullnameOverride: ""
-# -- Timezone for all containers (e.g., "UTC", "America/Mexico_City")
-timezone: "UTC"
+timezone: "America/Mexico_City"
 
-# -- Image configuration
+# -- Image
 image:
-  repository: paperclipai/paperclip
+  repository: ghcr.io/paperclipai/paperclip
   tag: "latest"
-  pullPolicy: IfNotPresent
-  # -- Image pull secrets (for private registries)
-  pullSecrets: []
+  pullPolicy: Always
 
-# -- Number of replicas (Paperclip is stateful via /paperclip PVC, keep 1 unless RWX storage)
 replicaCount: 1
 
 # =============================================================================
@@ -29,21 +25,11 @@ service:
   annotations: {}
 
 # =============================================================================
-# Ingress (Traefik)
+# Ingress - Traefik (standard Ingress class)
 # =============================================================================
 ingress:
+  # Disabled — cluster uses Traefik IngressRoute CRD (see ingressroute-paperclip.yaml)
   enabled: false
-  # -- IngressClass name (e.g., traefik, nginx, gce)
-  ingressClassName: traefik
-  annotations: {}
-    # traefik.ingress.kubernetes.io/router.entrypoints: websecure
-    # traefik.ingress.kubernetes.io/router.tls: "true"
-  host: "paperclip.example.com"
-  tls: []
-  # tls:
-  #   - secretName: paperclip-tls
-  #     hosts:
-  #       - paperclip.example.com
 
 # =============================================================================
 # Resources
@@ -57,89 +43,50 @@ resources:
     memory: 512Mi
 
 # =============================================================================
-# Persistence - /paperclip volume (agent configs, conversation state)
+# Persistence - /paperclip volume
 # =============================================================================
 persistence:
   enabled: true
-  storageClass: ""
+  storageClass: "csi-cinder-high-speed"
   accessMode: ReadWriteOnce
-  size: 5Gi
+  size: 10Gi
 
 # =============================================================================
-# Application Configuration
+# Application Config
 # =============================================================================
 config:
-  # -- Server port (must match service.port)
   port: 3100
-  # -- Serve built React UI alongside the API
   serveUI: true
-  # -- Deployment mode: "authenticated" (login required) | "open" (no auth)
   deploymentMode: authenticated
-  # -- Network exposure: "private" | "public"
   deploymentExposure: private
-  # -- Public URL used for OAuth callbacks, links in the UI, etc.
-  # Set to your ingress host URL in production
-  publicURL: "http://localhost:3100"
+  publicURL: "https://crew.alebrije.io"
 
 # =============================================================================
-# Authentication Secret (BETTER_AUTH_SECRET)
+# Auth Secret (BETTER_AUTH_SECRET)
+# Secret creado manualmente: kubectl create secret generic paperclip-auth-secret
 # =============================================================================
 auth:
-  # -- Secret value for BetterAuth (random string, min 32 chars)
-  # Leave empty to use existingSecret
   betterAuthSecret: ""
-  # -- Name of existing Secret containing the auth secret key
-  existingSecret: ""
-  # -- Key name within the existing secret
+  existingSecret: "paperclip-auth-secret"
   existingSecretKey: "better-auth-secret"
 
 # =============================================================================
-# PostgreSQL (embedded, optional)
+# External Database - usa postgres existente en namespace platform
+# postgres.platform.svc.cluster.local:5432
+# Secret creado manualmente: kubectl create secret generic paperclip-db-secret
 # =============================================================================
 postgresql:
-  # -- Deploy embedded PostgreSQL. Set to false to use externalDatabase
-  enabled: true
-  image:
-    repository: postgres
-    tag: "17-alpine"
-    pullPolicy: IfNotPresent
-  persistence:
-    enabled: true
-    storageClass: ""
-    accessMode: ReadWriteOnce
-    size: 10Gi
-  resources:
-    requests:
-      cpu: 100m
-      memory: 128Mi
-    limits:
-      cpu: 500m
-      memory: 256Mi
-  auth:
-    database: paperclip
-    username: paperclip
-    # -- PostgreSQL password. Leave empty to auto-generate, or use existingSecret
-    password: ""
-    # -- Use existing secret for PostgreSQL credentials (keys: username, password, database)
-    existingSecret: ""
+  enabled: false
 
-# =============================================================================
-# External Database (when postgresql.enabled=false)
-# =============================================================================
 externalDatabase:
-  # -- Full PostgreSQL connection string: postgresql://user:pass@host:5432/db
   url: ""
-  # -- Use existing secret for DATABASE_URL (key defined by existingSecretKey)
-  existingSecret: ""
+  existingSecret: "paperclip-db-secret"
   existingSecretKey: "database-url"
 
 # =============================================================================
-# Vault & External Secrets Operator (ESO) Integration
+# Vault + ESO - deshabilitado inicialmente
+# Activar cuando los paths existan en Vault: secret/data/paperclip/*
 # =============================================================================
-# When vault.enabled=true:
-# - Chart creates ClusterSecretStore pointing to Vault
-# - Chart creates ExternalSecret resources to pull secrets
-# - Prerequisites: ESO must be pre-installed; Vault KV v2 must have secrets at {mount}/paperclip/*
 vault:
   enabled: false
   address: "http://vault.vault.svc.cluster.local:8200"
@@ -150,7 +97,6 @@ vault:
   serviceAccount: "paperclip-vault-auth"
   namespace: "vault"
   refreshInterval: "1h"
-  # -- Retain or Delete K8s Secrets when ExternalSecret is deleted
   deletionPolicy: "Retain"
 
 # =============================================================================
@@ -162,13 +108,19 @@ podSecurityContext:
     type: RuntimeDefault
 
 containerSecurityContext:
-  runAsNonRoot: true
-  runAsUser: 1000
-  runAsGroup: 1000
+  # Paperclip entrypoint starts as root then drops to 'node' via setuid().
+  # CAP_SETUID must be retained — drop: ALL removes it and breaks the user switch.
+  # runAsNonRoot/runAsUser are nulled so K8s doesn't enforce a UID before the switch.
+  runAsNonRoot: false
+  runAsUser: null
+  runAsGroup: null
   allowPrivilegeEscalation: false
   capabilities:
     drop:
-      - ALL
+      - NET_RAW
+      - SYS_ADMIN
+      - SYS_PTRACE
+      - SYS_CHROOT
 
 # =============================================================================
 # Scheduling
@@ -186,7 +138,7 @@ serviceAccount:
   annotations: {}
 
 # =============================================================================
-# Horizontal Pod Autoscaler (not recommended for stateful Paperclip)
+# Autoscaling - deshabilitado (app stateful via PVC)
 # =============================================================================
 autoscaling:
   enabled: false
@@ -195,24 +147,20 @@ autoscaling:
   targetCPUUtilizationPercentage: 80
 
 # =============================================================================
-# Pod Disruption Budget
+# PodDisruptionBudget
 # =============================================================================
 podDisruptionBudget:
   enabled: false
-  minAvailable: 1
 
 # =============================================================================
 # NetworkPolicy
 # =============================================================================
 networkPolicy:
-  enabled: false
-  # Namespace where Traefik ingress controller runs (ingress NetworkPolicy)
+  enabled: true
   traefikNamespace: "services"
-  # Optional: allow ingress from additional namespace (e.g. monitoring)
-  allowFromNamespace: ""
 
 # =============================================================================
-# Reloader (Stakater) - auto-restart pods on ConfigMap/Secret changes
+# Reloader (Stakater) - instalado en el cluster OVH
 # =============================================================================
 reloader:
-  enabled: false
+  enabled: true

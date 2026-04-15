@@ -1,52 +1,60 @@
 {{- if .Values.networkPolicy.enabled }}
 ---
-# NetworkPolicy: Paperclip server
+# NetworkPolicy: Paperclip server — ingress from Traefik + egress to postgres/DNS/HTTPS
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "paperclip.fullname" . }}-server
+  name: {{ include "paperclip.fullname" . }}-allow-traefik
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "paperclip.labels" . | nindent 4 }}
-    app.kubernetes.io/component: server
 spec:
   podSelector:
     matchLabels:
       {{- include "paperclip.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: server
   policyTypes:
     - Ingress
     - Egress
   ingress:
-    # Allow traffic to the server on port 3100 from within the cluster
-    - ports:
-        - protocol: TCP
-          port: {{ .Values.service.port }}
-  egress:
-    # Allow server -> postgres
-    {{- if .Values.postgresql.enabled }}
-    - to:
-        - podSelector:
+    # Allow traffic from Traefik ingress controller namespace
+    - from:
+        - namespaceSelector:
             matchLabels:
-              app.kubernetes.io/name: {{ include "paperclip.name" . }}
-              app.kubernetes.io/component: postgres
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.traefikNamespace | default "services" }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
       ports:
         - protocol: TCP
-          port: 5432
+          port: {{ .Values.service.port }}
+    {{- if .Values.networkPolicy.allowFromNamespace }}
+    # Allow from additional namespace (e.g. monitoring)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.allowFromNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}
     {{- end }}
+  egress:
+    # Allow postgres — covers both bundled (svc in namespace) and external (any host:5432)
+    - ports:
+        - protocol: TCP
+          port: 5432
     # Allow DNS resolution
     - ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
           port: 53
-    # Allow HTTPS to external AI APIs (Claude, OpenAI)
+    # Allow HTTPS to external AI APIs (Claude, OpenAI, etc.)
     - ports:
         - protocol: TCP
           port: 443
 ---
 {{- if .Values.postgresql.enabled }}
-# NetworkPolicy: PostgreSQL
+# NetworkPolicy: Bundled PostgreSQL pod
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -64,12 +72,11 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # Allow ONLY paperclip server -> postgres
+    # Allow ONLY paperclip server -> bundled postgres
     - from:
         - podSelector:
             matchLabels:
               {{- include "paperclip.selectorLabels" . | nindent 14 }}
-              app.kubernetes.io/component: server
       ports:
         - protocol: TCP
           port: 5432
