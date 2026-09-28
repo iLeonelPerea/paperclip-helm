@@ -14,7 +14,12 @@ image:
   tag: "latest"
   pullPolicy: Always
 
-replicaCount: 1
+# 0 by owner order (2026-09-28, ADR-158 D9: Paperclip stays off). The pod had
+# crash-looped 608 times since 2026-09-26 on an unpinned `latest` image. Release
+# rev 9 applied it with --reuse-values (render verified: only `replicas` changed).
+# paperclip-postgres and its daily dump keep running. Raising it again requires
+# the M13 conditions (image by digest, sized memory, no global AI key).
+replicaCount: 0
 
 # =============================================================================
 # Service
