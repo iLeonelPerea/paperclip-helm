@@ -93,6 +93,9 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "paperclip.fullname" . }}-config
+            {{- with .Values.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           env:
             - name: DATABASE_URL
               valueFrom:
@@ -108,12 +111,18 @@ spec:
                 secretKeyRef:
                   name: {{ include "paperclip.secretName" . }}
                   key: {{ .Values.auth.existingSecretKey | default "better-auth-secret" }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           startupProbe:
             tcpSocket:
               port: http
             initialDelaySeconds: 10
             periodSeconds: 10
-            failureThreshold: 30
+            # The server applies pending DB migrations BEFORE it listens; a jump
+            # across many releases needs more than the default ~5 min window, and
+            # a kill mid-migration is worse than a slow first boot.
+            failureThreshold: {{ .Values.startupProbe.failureThreshold | default 30 }}
             timeoutSeconds: 5
           readinessProbe:
             tcpSocket:

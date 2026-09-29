@@ -8,18 +8,27 @@ nameOverride: ""
 fullnameOverride: ""
 timezone: "America/Mexico_City"
 
-# -- Image
+# -- Image — pinned by DIGEST (ADR-158 M13). `latest` resolved to this same
+# release on 2026-09-26 and a pod restart pulled it unannounced; with
+# `pullPolicy: Always` + a floating tag any restart can change the version.
+# Release 2026.916.1 (2026-09-21), multi-arch index digest measured on GHCR
+# 2026-09-29 (amd64 f203471a…, arm64 4e2e1e59…).
 image:
   repository: ghcr.io/paperclipai/paperclip
-  tag: "latest"
-  pullPolicy: Always
+  tag: "2026.916.1@sha256:a02ac35ac41df911af477422ea0e781cf41d2b2c600c66f0a5ac9d8c63f52c2c"
+  pullPolicy: IfNotPresent
 
-# 0 by owner order (2026-09-28, ADR-158 D9: Paperclip stays off). The pod had
-# crash-looped 608 times since 2026-09-26 on an unpinned `latest` image. Release
-# rev 9 applied it with --reuse-values (render verified: only `replicas` changed).
-# paperclip-postgres and its daily dump keep running. Raising it again requires
-# the M13 conditions (image by digest, sized memory, no global AI key).
-replicaCount: 0
+# 1 by owner order (2026-09-29: «puedes levantar paperclip… ajusta capacidades
+# para que se levante»). Was 0 from 2026-09-28 (D9) after 608 crash loops:
+# `JavaScript heap out of memory` at ~253 MB of heap with a 512Mi limit (the
+# production image sets no NODE_OPTIONS, so V8 sized the heap from the cgroup).
+replicaCount: 1
+
+# The first boot of 2026.916.1 against the April schema applies every pending
+# migration before listening; give it 15 min instead of ~5 before the kubelet
+# restarts it mid-migration.
+startupProbe:
+  failureThreshold: 90
 
 # =============================================================================
 # Service
@@ -39,13 +48,36 @@ ingress:
 # =============================================================================
 # Resources
 # =============================================================================
+# Sized 2026-09-29 against the single r3-32 node (4 CPU / 30 GiB allocatable;
+# CPU requests 3341m = 87 % booked, real use 715m; memory requests 10.2 GiB,
+# real use 16 GiB). Memory is what killed it: the server heap is capped at
+# 1.5 GiB (NODE_OPTIONS below) and the agent CLIs it spawns (claude-code et al.)
+# run in this same container, so the limit leaves ~1.5 GiB above the heap.
+# CPU request stays small (idle Node server) so rollouts of the rest of the
+# platform keep their headroom; the limit lets agent runs burst.
 resources:
   requests:
-    cpu: 200m
-    memory: 256Mi
+    cpu: 100m
+    memory: 1Gi
   limits:
-    cpu: 1000m
-    memory: 512Mi
+    cpu: 2000m
+    memory: 3Gi
+
+# NO global model key in the pod (Regla R / ADR-158 §1.2-bis): every company
+# gets its own AI connection through alebrije-adapt-paperclip (the platform
+# company with Alebrije's key, each tenant with its own). The old
+# ANTHROPIC_API_KEY extraEnv of release rev 8/9 is gone on purpose.
+extraEnv:
+  - name: NODE_OPTIONS
+    value: "--max-old-space-size=1536"
+  # Explicit instead of relying on config.json in the PVC: the non-TTY default
+  # already auto-applies, this makes it a declared decision.
+  - name: PAPERCLIP_MIGRATION_AUTO_APPLY
+    value: "true"
+  # Sign-up stays closed until the crew.alebrije.io ForwardAuth gate is in
+  # front (M13); alebrije-adapt-paperclip opens it only behind that gate.
+  - name: PAPERCLIP_AUTH_DISABLE_SIGN_UP
+    value: "true"
 
 # =============================================================================
 # Persistence - /paperclip volume

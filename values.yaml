@@ -66,6 +66,32 @@ persistence:
   size: 5Gi
 
 # =============================================================================
+# Extra environment variables (e.g., LLM provider API keys)
+# Append entries to the container's `env` list. Sourced from K8s secrets
+# (managed by ESO from Vault) — never inline literal values.
+# =============================================================================
+extraEnv: []
+  # - name: ANTHROPIC_API_KEY
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: paperclip-anthropic-secret
+  #       key: ANTHROPIC_API_KEY
+
+# =============================================================================
+# Extra envFrom sources (e.g., bulk-inject a whole secret as env vars)
+# =============================================================================
+extraEnvFrom: []
+  # - secretRef:
+  #     name: paperclip-extra-env
+
+# =============================================================================
+# Startup probe — the server applies pending migrations before it listens
+# =============================================================================
+startupProbe:
+  # 10 s period → failureThreshold × 10 s is the boot window (30 ≈ 5 min).
+  failureThreshold: 30
+
+# =============================================================================
 # Application Configuration
 # =============================================================================
 config:
