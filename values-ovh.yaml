@@ -74,10 +74,14 @@ extraEnv:
   # already auto-applies, this makes it a declared decision.
   - name: PAPERCLIP_MIGRATION_AUTO_APPLY
     value: "true"
-  # Sign-up stays closed until the crew.alebrije.io ForwardAuth gate is in
-  # front (M13); alebrije-adapt-paperclip opens it only behind that gate.
+  # Sign-up OPEN inside the cluster, CLOSED on the internet: the crew
+  # IngressRoute sends /api/auth/sign-up to deny-all-loopback-only (403,
+  # alebrije-infra k8s/prod/ingressroutes/crew-paperclip.yaml, measured
+  # 2026-09-29), and the NetworkPolicies only let Traefik and
+  # alebrije-adapt-paperclip reach port 3100. Paperclip creates users only by
+  # sign-up, and the adapter creates one per tenant (ADR-158 §2.3).
   - name: PAPERCLIP_AUTH_DISABLE_SIGN_UP
-    value: "true"
+    value: "false"
 
 # =============================================================================
 # Persistence - /paperclip volume
