@@ -82,6 +82,14 @@ extraEnv:
   # sign-up, and the adapter creates one per tenant (ADR-158 §2.3).
   - name: PAPERCLIP_AUTH_DISABLE_SIGN_UP
     value: "false"
+  # Private-exposure hostname guard: only these Host names are served (the
+  # public URL's host is added by Paperclip itself). The env REPLACES
+  # server.allowedHostnames of the config.json in the PVC (["crew.alebrije.io"]
+  # on 2026-09-29), so crew stays listed. The in-cluster FQDN is what
+  # alebrije-adapt-paperclip calls (PAPERCLIP_BASE_URL); without it every
+  # adapter call answered 403 "This hostname is not allowed".
+  - name: PAPERCLIP_ALLOWED_HOSTNAMES
+    value: "crew.alebrije.io,paperclip.platform.svc.cluster.local"
 
 # =============================================================================
 # Persistence - /paperclip volume
