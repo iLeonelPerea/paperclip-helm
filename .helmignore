@@ -18,3 +18,7 @@ vault-root-token*.json
 
 # Tests
 tests/
+
+# Syncthing conflict copies (globally git-ignored, but Helm still rendered
+# templates/service.sync-conflict-*.yaml as a second Service — 2026-10-08)
+*.sync-conflict-*

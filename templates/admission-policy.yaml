@@ -1,0 +1,112 @@
+{{- if and .Values.kubernetesExecution.enabled .Values.kubernetesExecution.admissionPolicy.enabled }}
+{{- $prefix := .Values.kubernetesExecution.namespacePrefix }}
+{{- $sa := printf "system:serviceaccount:%s:%s" .Release.Namespace (include "paperclip.serviceAccountName" .) }}
+# =============================================================================
+# Guard rails for the ClusterRole in rbac.yaml (RBAC cannot scope by namespace
+# name). Requests made by THIS server's ServiceAccount are denied unless:
+#   1. a namespace it creates or updates is named {{ $prefix }}*, enforces Pod
+#      Security «restricted» and carries the provider's managed-by label
+#      (exactly what tenant-orchestrator.ts writes); and
+#   2. every write it makes (create/update/delete, exec) lands inside a
+#      {{ $prefix }}* namespace.
+# A compromised or misconfigured server therefore cannot create a privileged
+# namespace, nor touch platform, temporal or any other namespace. Reads are not
+# admission-controlled; the ClusterRole grants no read of Secrets.
+# ValidatingAdmissionPolicy is GA since Kubernetes 1.30 (cluster: 1.32).
+# =============================================================================
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "paperclip.fullname" . }}-sandbox-namespaces
+  labels:
+    {{- include "paperclip.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["namespaces"]
+  matchConditions:
+    - name: only-the-paperclip-server
+      expression: 'request.userInfo.username == {{ $sa | quote }}'
+  validations:
+    - expression: 'object.metadata.name.startsWith({{ $prefix | quote }})'
+      message: "the Paperclip server may only create namespaces named {{ $prefix }}*"
+    - expression: >-
+        has(object.metadata.labels) &&
+        "pod-security.kubernetes.io/enforce" in object.metadata.labels &&
+        object.metadata.labels["pod-security.kubernetes.io/enforce"] == "restricted"
+      message: "a Paperclip sandbox namespace must enforce Pod Security «restricted»"
+    - expression: >-
+        has(object.metadata.labels) &&
+        "paperclip.io/managed-by" in object.metadata.labels &&
+        object.metadata.labels["paperclip.io/managed-by"] == "paperclip-k8s-plugin"
+      message: "a Paperclip sandbox namespace must carry paperclip.io/managed-by=paperclip-k8s-plugin"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "paperclip.fullname" . }}-sandbox-namespaces
+  labels:
+    {{- include "paperclip.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "paperclip.fullname" . }}-sandbox-namespaces
+  validationActions: ["Deny"]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "paperclip.fullname" . }}-sandbox-scope
+  labels:
+    {{- include "paperclip.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE", "CONNECT"]
+        resources: ["pods", "pods/exec", "secrets", "serviceaccounts", "resourcequotas", "limitranges"]
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["roles", "rolebindings"]
+      - apiGroups: ["networking.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["networkpolicies"]
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["jobs"]
+      {{- if eq .Values.kubernetesExecution.backend "sandbox-cr" }}
+      - apiGroups: ["agents.x-k8s.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["sandboxes"]
+      {{- end }}
+      {{- if eq .Values.kubernetesExecution.egressMode "cilium" }}
+      - apiGroups: ["cilium.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["ciliumnetworkpolicies"]
+      {{- end }}
+  matchConditions:
+    - name: only-the-paperclip-server
+      expression: 'request.userInfo.username == {{ $sa | quote }}'
+  validations:
+    - expression: 'request.namespace.startsWith({{ $prefix | quote }})'
+      message: "the Paperclip server may only write inside {{ $prefix }}* namespaces"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "paperclip.fullname" . }}-sandbox-scope
+  labels:
+    {{- include "paperclip.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "paperclip.fullname" . }}-sandbox-scope
+  validationActions: ["Deny"]
+{{- end }}

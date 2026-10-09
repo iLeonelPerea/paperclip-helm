@@ -1,0 +1,79 @@
+{{- if .Values.kubernetesExecution.enabled }}
+# =============================================================================
+# Kubernetes sandbox provider — what this server may do in the cluster.
+# The provider runs INSIDE the Paperclip server and talks to the API with this
+# release's ServiceAccount (PAPERCLIP_K8S_IN_CLUSTER=true). Verbs derived from
+# the calls it makes (packages/plugins/sandbox-providers/kubernetes/src,
+# Paperclip v2026.1005.0): create/read namespaces; create/read ServiceAccount,
+# Role, RoleBinding, ResourceQuota, LimitRange and NetworkPolicy; create/delete
+# Secrets and Jobs; read/list/delete Pods, read pod logs, exec into pods; Sandbox
+# CRs only with backend sandbox-cr; CiliumNetworkPolicy only with egressMode
+# cilium. No get/list on Secrets anywhere: the server writes per-run Secrets but
+# never reads one back.
+# RBAC cannot scope by namespace NAME, so this is a ClusterRole; the
+# ValidatingAdmissionPolicies in admission-policy.yaml confine every write to
+# {{ .Values.kubernetesExecution.namespacePrefix }}* namespaces created with Pod Security «restricted».
+# =============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "paperclip.fullname" . }}-sandbox-provider
+  labels:
+    {{- include "paperclip.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "create"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts", "resourcequotas", "limitranges"]
+    verbs: ["get", "create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "create"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "create"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "create", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs/status"]
+    verbs: ["get"]
+  {{- if eq .Values.kubernetesExecution.backend "sandbox-cr" }}
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "create", "delete"]
+  {{- end }}
+  {{- if eq .Values.kubernetesExecution.egressMode "cilium" }}
+  - apiGroups: ["cilium.io"]
+    resources: ["ciliumnetworkpolicies"]
+    verbs: ["get", "create"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "paperclip.fullname" . }}-sandbox-provider
+  labels:
+    {{- include "paperclip.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "paperclip.fullname" . }}-sandbox-provider
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "paperclip.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

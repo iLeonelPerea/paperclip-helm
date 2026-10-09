@@ -1,3 +1,22 @@
+{{- if and .Values.image.requireDigest (not .Values.image.digest) }}
+{{- fail "image.digest is required (ADR-158 M13: never a floating tag)" }}
+{{- end }}
+{{- if .Values.kubernetesExecution.enabled }}
+{{- if not .Values.kubernetesExecution.adapters }}
+{{- fail "kubernetesExecution.adapters must list each adapter with its runtime image pinned by digest" }}
+{{- end }}
+{{- range .Values.kubernetesExecution.adapters }}
+{{- if not (contains "@sha256:" (.runtimeImage | default "")) }}
+{{- fail (printf "runtime image of adapter %s is not pinned by digest" (.adapterType | default "?")) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if and .Values.kubernetesExecution.enabled (ne .Release.Namespace "paperclip") }}
+{{- fail "kubernetesExecution needs the release in namespace \"paperclip\": the sandbox provider hardcodes it (plugin.ts PAPERCLIP_SERVER_NAMESPACE) for the agents callback NetworkPolicy" }}
+{{- end }}
+{{- if and .Values.kubernetesExecution.enabled .Values.networkPolicy.enabled (not .Values.kubernetesExecution.apiServer.cidrs) }}
+{{- fail "kubernetesExecution with networkPolicy needs kubernetesExecution.apiServer.cidrs (the kubernetes Service endpoint) or the provider cannot reach the API" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,6 +37,11 @@ spec:
     metadata:
       labels:
         {{- include "paperclip.labels" . | nindent 8 }}
+        {{- if .Values.kubernetesExecution.enabled }}
+        # The provider's sandbox NetworkPolicy lets agent pods reach ONLY pods
+        # labelled app=paperclip-server in namespace paperclip (network-policy.ts).
+        app: paperclip-server
+        {{- end }}
       annotations:
         {{- include "paperclip.checksumAnnotations" . | nindent 8 }}
     spec:
@@ -82,7 +106,7 @@ spec:
       {{- end }}
       containers:
         - name: paperclip
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}{{ with .Values.image.digest }}@{{ . }}{{ end }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
@@ -113,6 +137,67 @@ spec:
                   key: {{ .Values.auth.existingSecretKey | default "better-auth-secret" }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- if .Values.kubernetesExecution.enabled }}
+            {{- with .Values.kubernetesExecution }}
+            # Every agent run of every company goes to that company's sandbox
+            # namespace, never to this pod (execution-policy-bootstrap.ts; the
+            # per-run guard in heartbeat.ts refuses local execution).
+            - name: PAPERCLIP_EXECUTION_MODE
+              value: "kubernetes"
+            - name: PAPERCLIP_K8S_IN_CLUSTER
+              value: "true"
+            - name: PAPERCLIP_K8S_BACKEND
+              value: {{ .backend | quote }}
+            - name: PAPERCLIP_K8S_NAMESPACE_PREFIX
+              value: {{ .namespacePrefix | quote }}
+            - name: PAPERCLIP_K8S_ADAPTER_TYPE
+              value: {{ .adapterType | quote }}
+            - name: PAPERCLIP_K8S_EGRESS_MODE
+              value: {{ .egressMode | quote }}
+            {{- with .egressAllowCidrs }}
+            - name: PAPERCLIP_K8S_EGRESS_ALLOW_CIDRS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .egressAllowFqdns }}
+            - name: PAPERCLIP_K8S_EGRESS_ALLOW_FQDNS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .runtimeClassName }}
+            - name: PAPERCLIP_K8S_RUNTIME_CLASS_NAME
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .rpcTimeoutMs }}
+            - name: PAPERCLIP_K8S_RPC_TIMEOUT_MS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .adapters }}
+            # Adapter registry: runtime images pinned by digest; only the listed
+            # adapter types stay available (adapter-registry-bootstrap.ts).
+            - name: PAPERCLIP_ADAPTERS
+              value: {{ toJson . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.crewHandoff.enabled }}
+            {{- with .Values.crewHandoff }}
+            # Password-less entry from the platform: Paperclip's own login handoff
+            # (workspace-login-handoff*.ts), registered only with the key; ONE
+            # company per instance. optional: without the Secret Paperclip still
+            # starts, only the password-less entry is missing.
+            - name: PAPERCLIP_WORKSPACE_HANDOFF_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .secretName }}
+                  key: {{ .secretKey }}
+                  optional: true
+            - name: PAPERCLIP_EXECUTION_WORKSPACE_ID
+              value: {{ .workspaceId | quote }}
+            {{- with .companyId }}
+            - name: PAPERCLIP_EXECUTION_WORKSPACE_COMPANY_ID
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             {{- end }}
           startupProbe:
             tcpSocket:

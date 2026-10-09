@@ -13,6 +13,10 @@ timezone: "UTC"
 image:
   repository: paperclipai/paperclip
   tag: "latest"
+  # Pin by digest (ADR-158 M13): rendered as repository:tag@digest when set.
+  digest: ""
+  # true = refuse to render without a digest.
+  requireDigest: false
   pullPolicy: IfNotPresent
   # -- Image pull secrets (for private registries)
   pullSecrets: []
@@ -128,6 +132,7 @@ postgresql:
   image:
     repository: postgres
     tag: "17-alpine"
+    digest: ""
     pullPolicy: IfNotPresent
   persistence:
     enabled: true
@@ -178,6 +183,15 @@ vault:
   refreshInterval: "1h"
   # -- Retain or Delete K8s Secrets when ExternalSecret is deleted
   deletionPolicy: "Retain"
+  # Use an EXISTING ClusterSecretStore (e.g. vault-backend) instead of creating one
+  # with its own Vault role; the paths below are relative to that store.
+  clusterSecretStoreName: ""
+  authKey: "paperclip-auth"
+  authProperty: "better-auth-secret"
+  dbKey: "paperclip-db"
+  # Pull secret materialized in this namespace: {name, registry, vaultKey,
+  # usernameProperty, tokenProperty}. Empty = none.
+  imagePullSecret: {}
 
 # =============================================================================
 # Security Contexts
@@ -236,9 +250,61 @@ networkPolicy:
   traefikNamespace: "services"
   # Optional: allow ingress from additional namespace (e.g. monitoring)
   allowFromNamespace: ""
+  # Extra ingress to the server port: [{namespace, podLabels, description}].
+  extraIngress: []
 
 # =============================================================================
 # Reloader (Stakater) - auto-restart pods on ConfigMap/Secret changes
 # =============================================================================
 reloader:
   enabled: false
+
+# =============================================================================
+# Kubernetes execution (ADR-158 §0-ter): every agent run of every company goes to
+# that company's sandbox namespace (<namespacePrefix><company id>), never to this
+# pod — Paperclip's own switch, PAPERCLIP_EXECUTION_MODE=kubernetes + PAPERCLIP_K8S_*
+# (server/src/services/execution-policy-bootstrap.ts). Needs the kubernetes sandbox
+# provider BUILT into the image (the official image ships its source only; see
+# image/Dockerfile). The provider hardcodes the server namespace "paperclip" and
+# selects the server pod by app=paperclip-server for the agents' callback policy:
+# with this on, the release MUST be installed in namespace "paperclip".
+# =============================================================================
+kubernetesExecution:
+  enabled: false
+  # job (stable, no CRD) | sandbox-cr (needs the kubernetes-sigs/agent-sandbox controller)
+  backend: job
+  namespacePrefix: "paperclip-sbx-"
+  adapterType: claude_local
+  # standard (NetworkPolicy; public IPv4 443/80 fallback for the adapter's FQDNs) | cilium
+  egressMode: standard
+  egressAllowCidrs: []
+  egressAllowFqdns: []
+  # e.g. kata-fc for microVM isolation (Kata Containers + Firecracker installed)
+  runtimeClassName: ""
+  rpcTimeoutMs: ""
+  # PAPERCLIP_ADAPTERS: [{adapterType, runtimeImage}] — pin runtime images by digest.
+  adapters: []
+  apiServer:
+    # Endpoint(s) of the `kubernetes` Service (kubectl get endpointslices -n default
+    # -l kubernetes.io/service-name=kubernetes).
+    cidrs: []
+    ports: [443, 6443]
+  admissionPolicy:
+    # ValidatingAdmissionPolicy confining the server's writes to <namespacePrefix>*.
+    enabled: true
+
+# =============================================================================
+# Password-less entry from the platform (ADR-158 §0-ter.4): Paperclip's own login
+# handoff, GET /api/auth/workspace-handoff/exchange. Registered only when the key
+# is present; accepts ONE company per instance (companyId). The key is the same
+# Vault property the platform adapter signs with.
+# =============================================================================
+crewHandoff:
+  enabled: false
+  secretName: paperclip-crew-handoff
+  secretKey: handoff-key
+  vaultKey: services/adapt-paperclip
+  vaultProperty: CREW_HANDOFF_KEY
+  workspaceId: alebrije-crew
+  # The company the ticket opens (set once it exists; empty = every ticket refused).
+  companyId: ""

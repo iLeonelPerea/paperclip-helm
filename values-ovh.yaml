@@ -1,60 +1,66 @@
 # =============================================================================
 # Paperclip Helm Chart - OVH Production Values
-# Cluster: kubernetes-admin@services  |  Namespace: platform
-# Storage: csi-cinder-high-speed (OVH Cinder default)
+# Cluster: kubernetes-admin@services  |  Namespace: paperclip (NOT platform)
+# =============================================================================
+# Clean reinstall decided by the owner on 2026-10-08 (ADR-158 §0-ter.5: «vamos
+# limpio y lo reinstalamos desde cero… trabájalo desde ahí y prepáralo»).
+# Install with alebrije-infra/scripts/paperclip-reinstalar-desde-cero.sh, never
+# by hand. The previous release (namespace platform, rev 12, 2026.916.1) is NOT
+# upgraded with this file: it stays untouched until the cutover and is retired
+# afterwards (its values live in `helm get values paperclip -n platform`).
+#
+# Why namespace paperclip: the kubernetes sandbox provider hardcodes it as the
+# server namespace for the agents' callback NetworkPolicy (plugin.ts
+# PAPERCLIP_SERVER_NAMESPACE = "paperclip"); the chart refuses any other one with
+# kubernetesExecution on. It also takes Paperclip out of the namespace shared by
+# every platform service.
 # =============================================================================
 
 nameOverride: ""
 fullnameOverride: ""
 timezone: "America/Mexico_City"
 
-# -- Image — pinned by DIGEST (ADR-158 M13). `latest` resolved to this same
-# release on 2026-09-26 and a pod restart pulled it unannounced; with
-# `pullPolicy: Always` + a floating tag any restart can change the version.
-# Release 2026.916.1 (2026-09-21), multi-arch index digest measured on GHCR
-# 2026-09-29 (amd64 f203471a…, arm64 4e2e1e59…).
+# -- Image: OUR build = the official ghcr.io/paperclipai/paperclip:2026.1005.0
+# (index digest sha256:de762433…, measured on GHCR 2026-10-08) plus the
+# kubernetes sandbox provider compiled exactly like upstream's `cloud` target
+# does (image/Dockerfile). The official image ships that provider as source only
+# («bundle not present» at boot), so without this build agents cannot run in
+# sandboxes. Pinned by digest (ADR-158 M13); the chart refuses an empty digest.
 image:
-  repository: ghcr.io/paperclipai/paperclip
-  tag: "2026.916.1@sha256:a02ac35ac41df911af477422ea0e781cf41d2b2c600c66f0a5ac9d8c63f52c2c"
+  repository: docker.io/ileonelperea/paperclip
+  tag: "2026.1005.0-k8s.1"
+  # Filled by scripts/build-images.sh (prints the pushed digest).
+  digest: ""
+  requireDigest: true
   pullPolicy: IfNotPresent
+  pullSecrets:
+    - name: regcred
 
-# 1 by owner order (2026-09-29: «puedes levantar paperclip… ajusta capacidades
-# para que se levante»). Was 0 from 2026-09-28 (D9) after 608 crash loops:
-# `JavaScript heap out of memory` at ~253 MB of heap with a 512Mi limit (the
-# production image sets no NODE_OPTIONS, so V8 sized the heap from the cgroup).
 replicaCount: 1
 
-# The first boot of 2026.916.1 against the April schema applies every pending
-# migration before listening; give it 15 min instead of ~5 before the kubelet
-# restarts it mid-migration.
+# A fresh database applies every migration (0001…0293) before listening; keep the
+# 15-minute window measured for the 2026-09-29 jump instead of ~5 minutes.
 startupProbe:
   failureThreshold: 90
 
 # =============================================================================
-# Service
+# Service / Ingress
 # =============================================================================
 service:
   type: ClusterIP
   port: 3100
   annotations: {}
 
-# =============================================================================
-# Ingress - Traefik (standard Ingress class)
-# =============================================================================
 ingress:
-  # Disabled — cluster uses Traefik IngressRoute CRD (see ingressroute-paperclip.yaml)
+  # crew.alebrije.io goes cloudflared → Traefik (internal entry) → IngressRoute
+  # with the ForwardAuth gate, all in alebrije-infra (ADR-162 D13).
   enabled: false
 
 # =============================================================================
-# Resources
+# Resources — kept from the 2026-09-29 sizing (OOM at 512Mi with ~253 MB heap).
+# Agents no longer run in this pod (kubernetesExecution), so this is headroom;
+# re-measure after a week of real runs before lowering it.
 # =============================================================================
-# Sized 2026-09-29 against the single r3-32 node (4 CPU / 30 GiB allocatable;
-# CPU requests 3341m = 87 % booked, real use 715m; memory requests 10.2 GiB,
-# real use 16 GiB). Memory is what killed it: the server heap is capped at
-# 1.5 GiB (NODE_OPTIONS below) and the agent CLIs it spawns (claude-code et al.)
-# run in this same container, so the limit leaves ~1.5 GiB above the heap.
-# CPU request stays small (idle Node server) so rollouts of the rest of the
-# platform keep their headroom; the limit lets agent runs burst.
 resources:
   requests:
     cpu: 100m
@@ -63,36 +69,26 @@ resources:
     cpu: 2000m
     memory: 3Gi
 
-# NO global model key in the pod (Regla R / ADR-158 §1.2-bis): every company
-# gets its own AI connection through alebrije-adapt-paperclip (the platform
-# company with Alebrije's key, each tenant with its own). The old
-# ANTHROPIC_API_KEY extraEnv of release rev 8/9 is gone on purpose.
+# NO global model key in the pod (Regla R / ADR-158 §1.2-bis): every company gets
+# its own AI connection through alebrije-adapt-paperclip (the platform company with
+# the platform key, each tenant with its own).
 extraEnv:
   - name: NODE_OPTIONS
     value: "--max-old-space-size=1536"
-  # Explicit instead of relying on config.json in the PVC: the non-TTY default
-  # already auto-applies, this makes it a declared decision.
   - name: PAPERCLIP_MIGRATION_AUTO_APPLY
     value: "true"
-  # Sign-up OPEN inside the cluster, CLOSED on the internet: the crew
-  # IngressRoute sends /api/auth/sign-up to deny-all-loopback-only (403,
-  # alebrije-infra k8s/prod/ingressroutes/crew-paperclip.yaml, measured
-  # 2026-09-29), and the NetworkPolicies only let Traefik and
-  # alebrije-adapt-paperclip reach port 3100. Paperclip creates users only by
+  # Sign-up OPEN inside the cluster, CLOSED on the internet: the crew IngressRoute
+  # answers 403 to /api/auth/sign-up, and the NetworkPolicy only lets Traefik, the
+  # adapter and the sandbox agents reach port 3100. Paperclip creates users only by
   # sign-up, and the adapter creates one per tenant (ADR-158 §2.3).
   - name: PAPERCLIP_AUTH_DISABLE_SIGN_UP
     value: "false"
-  # Private-exposure hostname guard: only these Host names are served (the
-  # public URL's host is added by Paperclip itself). The env REPLACES
-  # server.allowedHostnames of the config.json in the PVC (["crew.alebrije.io"]
-  # on 2026-09-29), so crew stays listed. The in-cluster FQDN is what
-  # alebrije-adapt-paperclip calls (PAPERCLIP_BASE_URL); without it every
-  # adapter call answered 403 "This hostname is not allowed".
+  # Hostname guard: the public host plus the in-cluster FQDN the adapter calls.
   - name: PAPERCLIP_ALLOWED_HOSTNAMES
-    value: "crew.alebrije.io,paperclip.platform.svc.cluster.local"
+    value: "crew.alebrije.io,paperclip.paperclip.svc.cluster.local"
 
 # =============================================================================
-# Persistence - /paperclip volume
+# Persistence - /paperclip volume (new claim in the new namespace)
 # =============================================================================
 persistence:
   enabled: true
@@ -110,43 +106,118 @@ config:
   deploymentExposure: private
   publicURL: "https://crew.alebrije.io"
 
-# =============================================================================
-# Auth Secret (BETTER_AUTH_SECRET)
-# Secret creado manualmente: kubectl create secret generic paperclip-auth-secret
-# =============================================================================
+# Secrets come from Vault through ESO (vault block below); the chart's own Secret
+# templates render nothing with vault.enabled.
 auth:
   betterAuthSecret: ""
-  existingSecret: "paperclip-auth-secret"
+  existingSecret: ""
   existingSecretKey: "better-auth-secret"
 
 # =============================================================================
-# External Database - usa postgres existente en namespace platform
-# postgres.platform.svc.cluster.local:5432
-# Secret creado manualmente: kubectl create secret generic paperclip-db-secret
+# PostgreSQL — bundled, in this namespace, fresh (the old paperclip-postgres in
+# platform stays as the backup of the previous instance until it is retired).
+# Same image the old one runs (measured 2026-10-08), pinned by digest; same size
+# and requests as the old StatefulSet (ADR-50 addendum, re-measured 2026-10-02).
 # =============================================================================
 postgresql:
-  enabled: false
+  enabled: true
+  image:
+    repository: postgres
+    tag: "16-alpine"
+    digest: "sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50"
+    pullPolicy: IfNotPresent
+  persistence:
+    enabled: true
+    storageClass: "csi-cinder-classic"
+    accessMode: ReadWriteOnce
+    size: 10Gi
+  resources:
+    requests:
+      cpu: 65m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  auth:
+    database: paperclip
+    username: paperclip
+    password: ""
+    existingSecret: ""
 
 externalDatabase:
   url: ""
-  existingSecret: "paperclip-db-secret"
+  existingSecret: ""
   existingSecretKey: "database-url"
 
 # =============================================================================
-# Vault + ESO - deshabilitado inicialmente
-# Activar cuando los paths existan en Vault: secret/data/paperclip/*
+# Vault + ESO — the cluster's existing ClusterSecretStore (vault-backend; its
+# eso-role reads alebrije/data/*). Seeded by
+# alebrije-infra/scripts/seed-vault-paperclip-instancia.sh (never rotates on
+# re-run) and seed-vault-paperclip-crew-handoff.sh.
 # =============================================================================
 vault:
-  enabled: false
-  address: "http://vault.vault.svc.cluster.local:8200"
-  tlsSkipVerify: false
-  role: "paperclip"
-  mount: "paperclip"
-  authPath: "kubernetes"
-  serviceAccount: "paperclip-vault-auth"
-  namespace: "vault"
+  enabled: true
+  clusterSecretStoreName: "vault-backend"
+  authKey: "platform/paperclip/v2/auth"
+  authProperty: "better-auth-secret"
+  dbKey: "platform/paperclip/v2/db"
+  imagePullSecret:
+    name: regcred
+    registry: "https://index.docker.io/v1/"
+    vaultKey: ci/dockerhub
+    usernameProperty: username
+    tokenProperty: token
   refreshInterval: "1h"
   deletionPolicy: "Retain"
+
+# =============================================================================
+# Kubernetes execution (ADR-158 §0-ter.2) — every agent run in its company's own
+# namespace paperclip-sbx-<company id>: Pod Security restricted, deny-all network
+# with egress only to DNS, this server and public IPv4 443/80 (the standard-mode
+# fallback for the adapter's FQDNs; Calico/Canal cannot filter by FQDN), non-root,
+# read-only rootfs, a Secret per run. backend job: stable, no CRD (the
+# agent-sandbox controller for sandbox-cr is alpha and not installed).
+# =============================================================================
+kubernetesExecution:
+  enabled: true
+  backend: job
+  namespacePrefix: "paperclip-sbx-"
+  adapterType: claude_local
+  egressMode: standard
+  egressAllowCidrs: []
+  egressAllowFqdns: []
+  runtimeClassName: ""
+  rpcTimeoutMs: ""
+  # Runtime image built from upstream docker/agent-runtime at v2026.1005.0
+  # (scripts/build-images.sh): ghcr.io/paperclipai/agent-runtime-* answers 404 to
+  # anonymous pulls, and sandbox namespaces have no pull secret, so this image is
+  # published PUBLIC (it holds only Ubuntu, Node, the Claude Code CLI and the shim).
+  # Only claude_local stays available on the instance.
+  adapters:
+    - adapterType: claude_local
+      # Filled by scripts/build-images.sh: docker.io/ileonelperea/agent-runtime-claude:<tag>@sha256:<digest>
+      runtimeImage: ""
+  apiServer:
+    # EndpointSlice of the `kubernetes` Service, measured 2026-10-08; same rule as
+    # platform/temporal-worker-egress-apiserver.
+    cidrs: ["10.3.0.1/32"]
+    ports: [443, 6443]
+  admissionPolicy:
+    enabled: true
+
+# =============================================================================
+# Password-less entry from the platform (ADR-158 §0-ter.4). companyId is the
+# PLATFORM company («Alebrije Plataforma», tenant alebrije-platform), known only
+# after the adapter provisions it: the install script sets it in a second pass.
+# =============================================================================
+crewHandoff:
+  enabled: true
+  secretName: paperclip-crew-handoff
+  secretKey: handoff-key
+  vaultKey: services/adapt-paperclip
+  vaultProperty: CREW_HANDOFF_KEY
+  workspaceId: alebrije-crew
+  companyId: ""
 
 # =============================================================================
 # Security Contexts
@@ -157,9 +228,9 @@ podSecurityContext:
     type: RuntimeDefault
 
 containerSecurityContext:
-  # Paperclip entrypoint starts as root then drops to 'node' via setuid().
-  # CAP_SETUID must be retained — drop: ALL removes it and breaks the user switch.
-  # runAsNonRoot/runAsUser are nulled so K8s doesn't enforce a UID before the switch.
+  # The entrypoint starts as root (tini, pid 1) and drops the server to `node`
+  # (uid 1000) via setuid() — measured 2026-10-08 in /proc: tini uid 0, server
+  # uid 1000. CAP_SETUID must stay, so ALL cannot be dropped.
   runAsNonRoot: false
   runAsUser: null
   runAsGroup: null
@@ -171,45 +242,36 @@ containerSecurityContext:
       - SYS_PTRACE
       - SYS_CHROOT
 
-# =============================================================================
-# Scheduling
-# =============================================================================
 nodeSelector: {}
 tolerations: []
 affinity: {}
 
-# =============================================================================
-# ServiceAccount
-# =============================================================================
 serviceAccount:
   create: true
   name: ""
   annotations: {}
 
-# =============================================================================
-# Autoscaling - deshabilitado (app stateful via PVC)
-# =============================================================================
 autoscaling:
   enabled: false
   minReplicas: 1
   maxReplicas: 3
   targetCPUUtilizationPercentage: 80
 
-# =============================================================================
-# PodDisruptionBudget
-# =============================================================================
 podDisruptionBudget:
   enabled: false
 
 # =============================================================================
-# NetworkPolicy
+# NetworkPolicy — this namespace starts empty, so the chart's policies are the
+# whole picture: Traefik (crew), the platform adapter, the sandbox agents.
 # =============================================================================
 networkPolicy:
   enabled: true
   traefikNamespace: "services"
+  extraIngress:
+    - namespace: platform
+      podLabels:
+        app: alebrije-adapt-paperclip
+      description: "alebrije-adapt-paperclip (provisioning, board keys, routines, decisions)"
 
-# =============================================================================
-# Reloader (Stakater) - instalado en el cluster OVH
-# =============================================================================
 reloader:
   enabled: true

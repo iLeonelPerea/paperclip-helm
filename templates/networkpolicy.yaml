@@ -37,6 +37,35 @@ spec:
         - protocol: TCP
           port: {{ .Values.service.port }}
     {{- end }}
+    {{- if .Values.kubernetesExecution.enabled }}
+    # Agent pods in the sandbox namespaces call back to the server (BOOTSTRAP_TOKEN,
+    # port 3100). Matches the provider's own egress rule from those namespaces.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              paperclip.io/managed-by: paperclip-k8s-plugin
+          podSelector:
+            matchLabels:
+              paperclip.io/role: agent
+      ports:
+        - protocol: TCP
+          port: {{ .Values.config.port }}
+    {{- end }}
+    {{- range .Values.networkPolicy.extraIngress }}
+    # {{ .description | default "extra ingress" }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .namespace }}
+          {{- with .podLabels }}
+          podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ $.Values.config.port }}
+    {{- end }}
   egress:
     # Allow postgres — covers both bundled (svc in namespace) and external (any host:5432)
     - ports:
@@ -52,6 +81,20 @@ spec:
     - ports:
         - protocol: TCP
           port: 443
+    {{- if .Values.kubernetesExecution.enabled }}
+    # Kubernetes API for the sandbox provider. Same shape as the measured precedent
+    # platform/temporal-worker-egress-apiserver (10.3.0.1/32, 443 and 6443).
+    - to:
+        {{- range .Values.kubernetesExecution.apiServer.cidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        {{- range .Values.kubernetesExecution.apiServer.ports }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    {{- end }}
 ---
 {{- if .Values.postgresql.enabled }}
 # NetworkPolicy: Bundled PostgreSQL pod
