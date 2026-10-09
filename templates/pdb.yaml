@@ -10,5 +10,5 @@ spec:
   minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
   selector:
     matchLabels:
-      {{- include "paperclip.selectorLabels" . | nindent 6 }}
+      {{- include "paperclip.serverSelectorLabels" . | nindent 6 }}
 {{- end }}

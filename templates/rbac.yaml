@@ -1,18 +1,22 @@
 {{- if .Values.kubernetesExecution.enabled }}
+{{- $prefix := .Values.kubernetesExecution.namespacePrefix }}
 # =============================================================================
 # Kubernetes sandbox provider — what this server may do in the cluster.
 # The provider runs INSIDE the Paperclip server and talks to the API with this
 # release's ServiceAccount (PAPERCLIP_K8S_IN_CLUSTER=true). Verbs derived from
 # the calls it makes (packages/plugins/sandbox-providers/kubernetes/src,
-# Paperclip v2026.1005.0): create/read namespaces; create/read ServiceAccount,
-# Role, RoleBinding, ResourceQuota, LimitRange and NetworkPolicy; create/delete
-# Secrets and Jobs; read/list/delete Pods, read pod logs, exec into pods; Sandbox
-# CRs only with backend sandbox-cr; CiliumNetworkPolicy only with egressMode
-# cilium. No get/list on Secrets anywhere: the server writes per-run Secrets but
-# never reads one back.
-# RBAC cannot scope by namespace NAME, so this is a ClusterRole; the
-# ValidatingAdmissionPolicies in admission-policy.yaml confine every write to
-# {{ .Values.kubernetesExecution.namespacePrefix }}* namespaces created with Pod Security «restricted».
+# Paperclip v2026.1005.0).
+#
+# Least privilege, audited 2026-10-08 («audita que no dejes nada que nos hackeen»):
+# reads are NOT admission-controlled, so a ClusterRoleBinding would have let a
+# compromised server read pods and pod LOGS of every namespace. Instead:
+#   - cluster-wide: only `get namespaces` (the provider reads its namespace first
+#     and creates it only when missing — tenant-orchestrator.ts ensureNamespace);
+#   - one sandbox namespace per company in sandboxCompanyIds, created HERE with
+#     Pod Security «restricted», and a RoleBinding to the namespaced rules only
+#     there. A company not listed cannot run agents: RBAC refuses, fail closed.
+# The ValidatingAdmissionPolicies (admission-policy.yaml) stay as a second wall.
+# No get/list on Secrets anywhere: the server writes per-run Secrets, never reads.
 # =============================================================================
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -21,9 +25,6 @@ metadata:
   labels:
     {{- include "paperclip.labels" . | nindent 4 }}
 rules:
-  - apiGroups: [""]
-    resources: ["namespaces"]
-    verbs: ["get", "create"]
   - apiGroups: [""]
     resources: ["serviceaccounts", "resourcequotas", "limitranges"]
     verbs: ["get", "create"]
@@ -63,17 +64,60 @@ rules:
   {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "paperclip.fullname" . }}-sandbox-namespace-reader
+  labels:
+    {{- include "paperclip.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "paperclip.fullname" . }}-sandbox-provider
+  name: {{ include "paperclip.fullname" . }}-sandbox-namespace-reader
   labels:
     {{- include "paperclip.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "paperclip.fullname" . }}-sandbox-provider
+  name: {{ include "paperclip.fullname" . }}-sandbox-namespace-reader
 subjects:
   - kind: ServiceAccount
     name: {{ include "paperclip.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- range .Values.kubernetesExecution.sandboxCompanyIds }}
+{{- $ns := printf "%s%s" $prefix (lower .) }}
+---
+# Sandbox namespace of company {{ . }} (the provider derives <prefix><company id>,
+# utils.ts deriveCompanySlug). Labels = exactly what tenant-orchestrator.ts writes.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns }}
+  labels:
+    paperclip.io/managed-by: paperclip-k8s-plugin
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    app.kubernetes.io/part-of: paperclip
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "paperclip.fullname" $ }}-sandbox-provider
+  namespace: {{ $ns }}
+  labels:
+    {{- include "paperclip.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "paperclip.fullname" $ }}-sandbox-provider
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "paperclip.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
 {{- end }}

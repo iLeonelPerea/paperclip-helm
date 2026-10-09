@@ -32,11 +32,12 @@ spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      {{- include "paperclip.selectorLabels" . | nindent 6 }}
+      {{- include "paperclip.serverSelectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "paperclip.labels" . | nindent 8 }}
+        app.kubernetes.io/component: server
         {{- if .Values.kubernetesExecution.enabled }}
         # The provider's sandbox NetworkPolicy lets agent pods reach ONLY pods
         # labelled app=paperclip-server in namespace paperclip (network-policy.ts).
@@ -135,6 +136,9 @@ spec:
                 secretKeyRef:
                   name: {{ include "paperclip.secretName" . }}
                   key: {{ .Values.auth.existingSecretKey | default "better-auth-secret" }}
+            # Closed unless a phase that creates users opens it (values: auth.disableSignUp).
+            - name: PAPERCLIP_AUTH_DISABLE_SIGN_UP
+              value: {{ .Values.auth.disableSignUp | quote }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

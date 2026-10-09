@@ -73,6 +73,18 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 PAPERCLIP_DIGEST="$(digest_of "$PAPERCLIP_REF")"
 echo "      ${PAPERCLIP_REF}@${PAPERCLIP_DIGEST}"
 
+echo "[3b/5] Escaneo ANTES de publicar (trivy, con tus credenciales de Docker): secretos en"
+echo "       cualquier capa y vulnerabilidades CRÍTICAS con arreglo. Cualquier hallazgo detiene"
+echo "       todo; una excepción la decide el dueño, nunca este guion."
+command -v trivy >/dev/null || { echo "ERROR: falta trivy (brew install trivy)." >&2; exit 1; }
+for ref in "${RUNTIME_REF}@${RUNTIME_DIGEST}" "${PAPERCLIP_REF}@${PAPERCLIP_DIGEST}"; do
+  trivy image --quiet --scanners secret --exit-code 1 "$ref" \
+    || { echo "ERROR: trivy encontró secretos en ${ref}: NO publicar." >&2; exit 1; }
+  trivy image --quiet --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 1 "$ref" \
+    || { echo "ERROR: vulnerabilidades CRÍTICAS con arreglo en ${ref}: decide el dueño antes de publicar." >&2; exit 1; }
+  echo "      ${ref}: sin secretos y sin CRÍTICAS con arreglo"
+done
+
 echo "[4/5] ¿La imagen de runtime se baja SIN credenciales? (los namespaces de sandbox no tienen pull secret)"
 anon_token="$(curl -sS --max-time 15 "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ileonelperea/agent-runtime-claude:pull" | jq -r .token)"
 code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 -I \

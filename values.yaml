@@ -122,6 +122,10 @@ auth:
   existingSecret: ""
   # -- Key name within the existing secret
   existingSecretKey: "better-auth-secret"
+  # PAPERCLIP_AUTH_DISABLE_SIGN_UP. Closed by default: in-cluster callers (the
+  # adapter AND the sandbox agents, which reach port 3100) could otherwise sign up.
+  # Open it only while users are created (the install script does it per phase).
+  disableSignUp: true
 
 # =============================================================================
 # PostgreSQL (embedded, optional)
@@ -292,6 +296,9 @@ kubernetesExecution:
   admissionPolicy:
     # ValidatingAdmissionPolicy confining the server's writes to <namespacePrefix>*.
     enabled: true
+  # One sandbox namespace per company id (created by this chart with a RoleBinding);
+  # a company not listed cannot run agents — RBAC refuses, fail closed.
+  sandboxCompanyIds: []
 
 # =============================================================================
 # Password-less entry from the platform (ADR-158 §0-ter.4): Paperclip's own login

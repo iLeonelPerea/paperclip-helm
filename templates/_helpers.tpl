@@ -47,6 +47,16 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+Server-only selector: the bundled Postgres carries the same name/instance labels
+(paperclip.labels), so without the component the server Service, Deployment and
+NetworkPolicy also selected the Postgres pod (measured on the render, 2026-10-08).
+*/}}
+{{- define "paperclip.serverSelectorLabels" -}}
+{{ include "paperclip.selectorLabels" . }}
+app.kubernetes.io/component: server
+{{- end }}
+
+{{/*
 Create the name of the service account to use
 */}}
 {{- define "paperclip.serviceAccountName" -}}

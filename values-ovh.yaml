@@ -77,12 +77,6 @@ extraEnv:
     value: "--max-old-space-size=1536"
   - name: PAPERCLIP_MIGRATION_AUTO_APPLY
     value: "true"
-  # Sign-up OPEN inside the cluster, CLOSED on the internet: the crew IngressRoute
-  # answers 403 to /api/auth/sign-up, and the NetworkPolicy only lets Traefik, the
-  # adapter and the sandbox agents reach port 3100. Paperclip creates users only by
-  # sign-up, and the adapter creates one per tenant (ADR-158 §2.3).
-  - name: PAPERCLIP_AUTH_DISABLE_SIGN_UP
-    value: "false"
   # Hostname guard: the public host plus the in-cluster FQDN the adapter calls.
   - name: PAPERCLIP_ALLOWED_HOSTNAMES
     value: "crew.alebrije.io,paperclip.paperclip.svc.cluster.local"
@@ -112,6 +106,11 @@ auth:
   betterAuthSecret: ""
   existingSecret: ""
   existingSecretKey: "better-auth-secret"
+  # Sign-up CLOSED in steady state (audit 2026-10-08): the sandbox agents reach port
+  # 3100 and could otherwise sign up from inside the cluster; the edge already
+  # answers 403. The install script opens it only for the phases that create users
+  # (admin, conexiones, dueno) and closes it after.
+  disableSignUp: true
 
 # =============================================================================
 # PostgreSQL — bundled, in this namespace, fresh (the old paperclip-postgres in
@@ -204,6 +203,9 @@ kubernetesExecution:
     ports: [443, 6443]
   admissionPolicy:
     enabled: true
+  # Filled by the install script after provisioning (fase conexiones): the company
+  # ids of Alebrije Plataforma, Alebrije and lafelabs, one sandbox namespace each.
+  sandboxCompanyIds: []
 
 # =============================================================================
 # Password-less entry from the platform (ADR-158 §0-ter.4). companyId is the

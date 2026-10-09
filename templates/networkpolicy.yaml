@@ -11,7 +11,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      {{- include "paperclip.selectorLabels" . | nindent 6 }}
+      {{- include "paperclip.serverSelectorLabels" . | nindent 6 }}
   policyTypes:
     - Ingress
     - Egress
@@ -67,10 +67,23 @@ spec:
           port: {{ $.Values.config.port }}
     {{- end }}
   egress:
-    # Allow postgres — covers both bundled (svc in namespace) and external (any host:5432)
+    {{- if .Values.postgresql.enabled }}
+    # Its own bundled Postgres only (audit 2026-10-08: «any host:5432» let the
+    # server knock on every database of the cluster).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "paperclip.name" . }}
+              app.kubernetes.io/component: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- else }}
+    # External database (host not known to the chart): any host on 5432.
     - ports:
         - protocol: TCP
           port: 5432
+    {{- end }}
     # Allow DNS resolution
     - ports:
         - protocol: UDP
@@ -119,7 +132,7 @@ spec:
     - from:
         - podSelector:
             matchLabels:
-              {{- include "paperclip.selectorLabels" . | nindent 14 }}
+              {{- include "paperclip.serverSelectorLabels" . | nindent 14 }}
       ports:
         - protocol: TCP
           port: 5432
