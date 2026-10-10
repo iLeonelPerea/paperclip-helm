@@ -206,7 +206,7 @@ kubernetesExecution:
     enabled: true
   # Filled by the install script after provisioning (fase conexiones): the company
   # ids of Alebrije Plataforma, Alebrije and lafelabs, one sandbox namespace each.
-  sandboxCompanyIds: []
+  sandboxCompanyIds: ["0c1dde63-2475-4d31-b5cb-510dae11cd4b", "003b927e-5941-4062-9223-5a98ae242277", "2cdeb7d1-a238-4fe5-b45d-e36eb76ba705"]
   # regcred (Vault ci/dockerhub, vault.imagePullSecret) + paperclip-tenant-sa in each
   # sandbox namespace, so the private runtime image is pulled with our credentials.
   sandboxImagePullSecret: true
@@ -223,7 +223,7 @@ crewHandoff:
   vaultKey: services/adapt-paperclip
   vaultProperty: CREW_HANDOFF_KEY
   workspaceId: alebrije-crew
-  companyId: ""
+  companyId: "0c1dde63-2475-4d31-b5cb-510dae11cd4b"
 
 # =============================================================================
 # Security Contexts
