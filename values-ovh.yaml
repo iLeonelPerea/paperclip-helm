@@ -28,9 +28,9 @@ timezone: "America/Mexico_City"
 # sandboxes. Pinned by digest (ADR-158 M13); the chart refuses an empty digest.
 image:
   repository: docker.io/ileonelperea/paperclip
-  tag: "2026.1005.0-k8s.1"
+  tag: "2026.1005.0-k8s.2"
   # Filled by scripts/build-images.sh (prints the pushed digest).
-  digest: ""
+  digest: "sha256:6f7cc3f768bf61b6823aaf34d288bf9d81393348da8a2605737a4a6409fca517"
   requireDigest: true
   pullPolicy: IfNotPresent
   pullSecrets:
@@ -196,7 +196,7 @@ kubernetesExecution:
   adapters:
     - adapterType: claude_local
       # Filled by scripts/build-images.sh: docker.io/ileonelperea/agent-runtime-claude:<tag>@sha256:<digest>
-      runtimeImage: ""
+      runtimeImage: "docker.io/ileonelperea/agent-runtime-claude:2026.1005.0-1@sha256:61b823414ea68cccffe5284232ab8557d35ded43a9e72455ff8af90f45da3ed2"
   apiServer:
     # EndpointSlice of the `kubernetes` Service, measured 2026-10-08; same rule as
     # platform/temporal-worker-egress-apiserver.

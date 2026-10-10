@@ -31,7 +31,7 @@ UPSTREAM_REPO="https://github.com/paperclipai/paperclip.git"
 UPSTREAM_TAG="v2026.1005.0"
 UPSTREAM_COMMIT="467125f"          # measured 2026-10-08 (git log -1 of the tag)
 REGISTRY="docker.io/ileonelperea"
-PAPERCLIP_TAG="${PAPERCLIP_TAG:-2026.1005.0-k8s.1}"
+PAPERCLIP_TAG="${PAPERCLIP_TAG:-2026.1005.0-k8s.2}"
 RUNTIME_TAG="${RUNTIME_TAG:-2026.1005.0-1}"
 WRITE_VALUES=0
 [[ "${1:-}" == "--escribir-values" ]] && WRITE_VALUES=1
@@ -80,12 +80,16 @@ echo "[3b/5] Escaneo ANTES de usarlas (trivy, con tus credenciales de Docker): s
 echo "       cualquier capa y vulnerabilidades CRÍTICAS con arreglo. Cualquier hallazgo detiene"
 echo "       todo; una excepción la decide el dueño, nunca este guion."
 command -v trivy >/dev/null || { echo "ERROR: falta trivy (brew install trivy)." >&2; exit 1; }
+# Each architecture is its own filesystem (a multi-arch index scanned without
+# --platform is ONE of them): both are scanned.
 for ref in "${RUNTIME_REF}@${RUNTIME_DIGEST}" "${PAPERCLIP_REF}@${PAPERCLIP_DIGEST}"; do
-  trivy image --quiet --scanners secret --exit-code 1 "$ref" \
-    || { echo "ERROR: trivy encontró secretos en ${ref}: no se escriben sus digests ni se instala." >&2; exit 1; }
-  trivy image --quiet --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 1 "$ref" \
-    || { echo "ERROR: vulnerabilidades CRÍTICAS con arreglo en ${ref}: decide el dueño antes de instalarla." >&2; exit 1; }
-  echo "      ${ref}: sin secretos y sin CRÍTICAS con arreglo"
+  for plat in linux/amd64 linux/arm64; do
+    trivy image --quiet --platform "$plat" --scanners secret --exit-code 1 "$ref" \
+      || { echo "ERROR: trivy encontró secretos en ${ref} (${plat}): no se escriben sus digests ni se instala." >&2; exit 1; }
+    trivy image --quiet --platform "$plat" --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 1 "$ref" \
+      || { echo "ERROR: vulnerabilidades CRÍTICAS con arreglo en ${ref} (${plat}): decide el dueño antes de instalarla." >&2; exit 1; }
+    echo "      ${ref} (${plat}): sin secretos y sin CRÍTICAS con arreglo"
+  done
 done
 
 echo "[4/5] ¿Las imágenes quedaron PRIVADAS? (el digest ya existe: lo leyó imagetools con tus credenciales)"
