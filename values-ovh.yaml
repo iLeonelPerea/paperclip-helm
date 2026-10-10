@@ -75,9 +75,14 @@ extraEnv:
     value: "--max-old-space-size=1536"
   - name: PAPERCLIP_MIGRATION_AUTO_APPLY
     value: "true"
-  # Hostname guard: the public host plus the in-cluster FQDN the adapter calls.
+  # Hostname guard (and better-auth's trusted origins): the platform team's host,
+  # the tenants' host and the in-cluster FQDN the adapter calls. agentes.alebrije.io
+  # (owner 2026-10-10: «que cada tenant pueda entrar desde su dashboard») is where a
+  # tenant user lands in ITS company, behind alebrije-adapt-paperclip's tenant gate
+  # (alebrije-infra ingressroutes/agentes-paperclip-tunel.yaml). Without it here the
+  # guard refuses the host and better-auth refuses the session's origin.
   - name: PAPERCLIP_ALLOWED_HOSTNAMES
-    value: "crew.alebrije.io,paperclip.paperclip.svc.cluster.local"
+    value: "crew.alebrije.io,agentes.alebrije.io,paperclip.paperclip.svc.cluster.local"
 
 # =============================================================================
 # Persistence - /paperclip volume (new claim in the new namespace)
