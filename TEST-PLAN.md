@@ -249,15 +249,15 @@ Expected: Deployment, Service, StatefulSet (postgres), and associated pods
 
 ### 1.3 — Wait for PostgreSQL Readiness
 
-Monitor PostgreSQL StatefulSet startup (~1-2 minutes).
+Monitor the PostgreSQL Deployment startup (~1-2 minutes).
 
 ```bash
 kubectl get pods -n paperclip -w
 ```
 
 Watch for:
-- `paperclip-postgresql-0` → Running → Ready (2/2)
-- PostgreSQL readinessProbe: `pg_isready -U paperclip -d paperclip`
+- `paperclip-postgres-*` → Running → Ready (1/1)
+- PostgreSQL readinessProbe: `pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"`
 
 Exit watch once postgres is Ready (Ctrl+C).
 
@@ -266,20 +266,19 @@ Exit watch once postgres is Ready (Ctrl+C).
 
 ---
 
-### 1.4 — Verify PostgreSQL Init Container
+### 1.4 — Verify PostgreSQL Initialization
 
-Check that database initialization completed successfully.
+The image's entrypoint creates the database on first boot (no init container).
 
 ```bash
-kubectl logs -n paperclip paperclip-postgresql-0 -c paperclip-init-db
+kubectl logs -n paperclip deploy/paperclip-postgres -c postgres
 ```
 
 Expected output:
-- Database creation logs
-- Schema initialization (if applicable)
+- `database system is ready to accept connections`
 - No errors
 
-- [ ] Init container logs show successful initialization
+- [ ] Postgres logs show the database ready
 - [ ] No errors in initialization logs
 
 ---

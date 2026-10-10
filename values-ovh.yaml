@@ -4,10 +4,8 @@
 # =============================================================================
 # Clean reinstall decided by the owner on 2026-10-08 (ADR-158 §0-ter.5: «vamos
 # limpio y lo reinstalamos desde cero… trabájalo desde ahí y prepáralo»).
-# Install with alebrije-infra/scripts/paperclip-reinstalar-desde-cero.sh, never
-# by hand. The previous release (namespace platform, rev 12, 2026.916.1) is NOT
-# upgraded with this file: it stays untouched until the cutover and is retired
-# afterwards (its values live in `helm get values paperclip -n platform`).
+# Installed on 2026-10-09 with alebrije-infra/scripts/paperclip-reinstalar-desde-cero.sh,
+# never by hand; its `instalar` phase (helm upgrade --install --atomic) also upgrades it.
 #
 # Why namespace paperclip: the kubernetes sandbox provider hardcodes it as the
 # server namespace for the agents' callback NetworkPolicy (plugin.ts
@@ -113,10 +111,10 @@ auth:
   disableSignUp: true
 
 # =============================================================================
-# PostgreSQL — bundled, in this namespace, fresh (the old paperclip-postgres in
-# platform stays as the backup of the previous instance until it is retired).
-# Same image the old one runs (measured 2026-10-08), pinned by digest; same size
-# and requests as the old StatefulSet (ADR-50 addendum, re-measured 2026-10-02).
+# PostgreSQL — bundled, in this namespace, pinned by digest (the same
+# postgres:16-alpine digest as postgres-prod-patch.yaml in alebrije-infra); size
+# and requests per the ADR-50 addendum (re-measured 2026-10-02). Its daily
+# pg_dump to OVH is alebrije-infra/k8s/prod/paperclip/backup.yaml.
 # =============================================================================
 postgresql:
   enabled: true
