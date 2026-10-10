@@ -33,6 +33,16 @@ metadata:
   {{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  {{- if and .Values.persistence.enabled (eq .Values.persistence.accessMode "ReadWriteOnce") }}
+  # One replica on a ReadWriteOnce disk: the old pod has to let go of it before the
+  # new one mounts it, as in postgres/deployment.yaml. With RollingUpdate the new pod
+  # waits forever on «Multi-Attach» whenever it lands on the other node (measured
+  # 2026-10-10, 2-node cluster: helm --atomic rolled back after its timeout).
+  # rollingUpdate: null lets an existing RollingUpdate Deployment switch over.
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  {{- end }}
   selector:
     matchLabels:
       {{- include "paperclip.serverSelectorLabels" . | nindent 6 }}
