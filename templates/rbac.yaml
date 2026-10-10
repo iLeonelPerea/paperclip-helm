@@ -119,5 +119,27 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "paperclip.serviceAccountName" $ }}
     namespace: {{ $.Release.Namespace }}
+{{- if $.Values.kubernetesExecution.sandboxImagePullSecret }}
+---
+# Private runtime image (decided 2026-10-09: nothing published). Forced kubernetes
+# mode has no PAPERCLIP_K8S_* for pull secrets, but the provider REUSES this
+# ServiceAccount when it already exists (tenant-orchestrator.ts ensureServiceAccount:
+# read, create only on 404) and its pods set no imagePullSecrets of their own
+# (pod-spec-builder.ts), so the ServiceAccount admission adds this one. No API
+# token: the agent pods never mount it (automountServiceAccountToken false there too).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $.Values.kubernetesExecution.tenantServiceAccountName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "paperclip.labels" $ | nindent 4 }}
+    paperclip.io/managed-by: paperclip-k8s-plugin
+automountServiceAccountToken: false
+imagePullSecrets:
+  - name: {{ $.Values.vault.imagePullSecret.name }}
+---
+{{ include "paperclip.pullSecretExternalSecret" (dict "root" $ "namespace" $ns) }}
+{{- end }}
 {{- end }}
 {{- end }}

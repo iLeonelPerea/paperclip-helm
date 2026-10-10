@@ -299,6 +299,14 @@ kubernetesExecution:
   # One sandbox namespace per company id (created by this chart with a RoleBinding);
   # a company not listed cannot run agents — RBAC refuses, fail closed.
   sandboxCompanyIds: []
+  # Private runtime images: every sandbox namespace also gets the provider's
+  # ServiceAccount with imagePullSecrets [vault.imagePullSecret.name] and that pull
+  # secret through ESO (needs vault.enabled + vault.imagePullSecret). Off = the
+  # runtime images must be pullable anonymously.
+  sandboxImagePullSecret: false
+  # Must equal the provider's constant (plugin.ts TENANT_SERVICE_ACCOUNT,
+  # tenant-orchestrator.ts SERVICE_ACCOUNT_NAME; v2026.1005.0).
+  tenantServiceAccountName: paperclip-tenant-sa
 
 # =============================================================================
 # Password-less entry from the platform (ADR-158 §0-ter.4): Paperclip's own login

@@ -57,6 +57,59 @@ app.kubernetes.io/component: server
 {{- end }}
 
 {{/*
+ExternalSecret of the pull secret for our private images (vault.imagePullSecret)
+in the namespace given: the release namespace (server image) and, with
+kubernetesExecution.sandboxImagePullSecret, every sandbox namespace (runtime
+image). Same template as alebrije-infra k8s/prod/regcred-external-secret.yaml
+(Vault ci/dockerhub). The inner {{ "{{ }}" }} are ESO's template, escaped for Helm.
+Usage: include "paperclip.pullSecretExternalSecret" (dict "root" $ "namespace" $ns)
+*/}}
+{{- define "paperclip.pullSecretExternalSecret" -}}
+{{- $root := .root -}}
+{{- with $root.Values.vault.imagePullSecret -}}
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: {{ .name }}-eso
+  namespace: {{ $.namespace }}
+  labels:
+    {{- include "paperclip.labels" $root | nindent 4 }}
+spec:
+  refreshInterval: {{ $root.Values.vault.refreshInterval }}
+  secretStoreRef:
+    name: {{ $root.Values.vault.clusterSecretStoreName | default (printf "%s-vault-store" (include "paperclip.fullname" $root)) }}
+    kind: ClusterSecretStore
+  target:
+    name: {{ .name }}
+    creationPolicy: Owner
+    deletionPolicy: Retain
+    template:
+      type: kubernetes.io/dockerconfigjson
+      engineVersion: v2
+      data:
+        .dockerconfigjson: |
+          {
+            "auths": {
+              {{ .registry | quote }}: {
+                "username": "{{ "{{ .username }}" }}",
+                "password": "{{ "{{ .token }}" }}",
+                "auth": "{{ "{{ printf \"%s:%s\" .username .token | b64enc }}" }}"
+              }
+            }
+          }
+  data:
+    - secretKey: username
+      remoteRef:
+        key: {{ .vaultKey }}
+        property: {{ .usernameProperty }}
+    - secretKey: token
+      remoteRef:
+        key: {{ .vaultKey }}
+        property: {{ .tokenProperty }}
+{{- end }}
+{{- end }}
+
+{{/*
 Create the name of the service account to use
 */}}
 {{- define "paperclip.serviceAccountName" -}}

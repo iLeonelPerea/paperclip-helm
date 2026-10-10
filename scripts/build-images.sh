@@ -8,11 +8,14 @@
 #        the paperclip namespace gets regcred through ESO (values-ovh.yaml).
 #   2. docker.io/ileonelperea/agent-runtime-claude:<RUNTIME_TAG> (+ its base)
 #      = upstream docker/agent-runtime at the SAME tag, built with upstream's own
-#        buildx-bake.hcl. ghcr.io/paperclipai/agent-runtime-* answers 404 to
-#        anonymous pulls (measured 2026-10-08), and in forced kubernetes mode the
-#        sandbox namespaces get no pull secret (PAPERCLIP_K8S_* has no
-#        imagePullSecrets), so this image MUST be pullable anonymously. It holds
-#        only Ubuntu, Node, the Claude Code CLI and Paperclip's agent shim.
+#        buildx-bake.hcl (ghcr.io/paperclipai/agent-runtime-* answers 404 to
+#        anonymous pulls, measured 2026-10-08). PRIVATE like every image of ours
+#        (decided 2026-10-09: nothing published): forced kubernetes mode has no
+#        PAPERCLIP_K8S_* for pull secrets, so the chart gives every sandbox
+#        namespace regcred plus the provider's ServiceAccount carrying it
+#        (kubernetesExecution.sandboxImagePullSecret). New repositories of this
+#        account are born private (0 public repositories, measured 2026-10-09);
+#        step 4 refuses to continue if this one is not.
 #
 # Multi-arch, the Alebrije standard (docker platform guard): linux/amd64 (the OVH
 # node) + linux/arm64 (local M-series), with registry build cache (M160). Never a
@@ -73,30 +76,36 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 PAPERCLIP_DIGEST="$(digest_of "$PAPERCLIP_REF")"
 echo "      ${PAPERCLIP_REF}@${PAPERCLIP_DIGEST}"
 
-echo "[3b/5] Escaneo ANTES de publicar (trivy, con tus credenciales de Docker): secretos en"
+echo "[3b/5] Escaneo ANTES de usarlas (trivy, con tus credenciales de Docker): secretos en"
 echo "       cualquier capa y vulnerabilidades CRÍTICAS con arreglo. Cualquier hallazgo detiene"
 echo "       todo; una excepción la decide el dueño, nunca este guion."
 command -v trivy >/dev/null || { echo "ERROR: falta trivy (brew install trivy)." >&2; exit 1; }
 for ref in "${RUNTIME_REF}@${RUNTIME_DIGEST}" "${PAPERCLIP_REF}@${PAPERCLIP_DIGEST}"; do
   trivy image --quiet --scanners secret --exit-code 1 "$ref" \
-    || { echo "ERROR: trivy encontró secretos en ${ref}: NO publicar." >&2; exit 1; }
+    || { echo "ERROR: trivy encontró secretos en ${ref}: no se escriben sus digests ni se instala." >&2; exit 1; }
   trivy image --quiet --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 1 "$ref" \
-    || { echo "ERROR: vulnerabilidades CRÍTICAS con arreglo en ${ref}: decide el dueño antes de publicar." >&2; exit 1; }
+    || { echo "ERROR: vulnerabilidades CRÍTICAS con arreglo en ${ref}: decide el dueño antes de instalarla." >&2; exit 1; }
   echo "      ${ref}: sin secretos y sin CRÍTICAS con arreglo"
 done
 
-echo "[4/5] ¿La imagen de runtime se baja SIN credenciales? (los namespaces de sandbox no tienen pull secret)"
-anon_token="$(curl -sS --max-time 15 "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ileonelperea/agent-runtime-claude:pull" | jq -r .token)"
-code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 -I \
-  -H "Authorization: Bearer ${anon_token}" \
-  -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" \
-  "https://registry-1.docker.io/v2/ileonelperea/agent-runtime-claude/manifests/${RUNTIME_DIGEST}")"
-if [[ "$code" != "200" ]]; then
-  echo "ERROR: pull anónimo de agent-runtime-claude responde ${code}: el repositorio no es público." >&2
-  echo "       Hazlo público en Docker Hub (solo trae software abierto) y vuelve a correr con --escribir-values." >&2
-  exit 1
-fi
-echo "      pull anónimo: 200"
+echo "[4/5] ¿Las imágenes quedaron PRIVADAS? (el digest ya existe: lo leyó imagetools con tus credenciales)"
+for repo in agent-runtime-base agent-runtime-claude paperclip; do
+  anon_token="$(curl -sS --max-time 15 "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ileonelperea/${repo}:pull" | jq -r .token)"
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 -I \
+    -H "Authorization: Bearer ${anon_token}" \
+    -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" \
+    "https://registry-1.docker.io/v2/ileonelperea/${repo}/manifests/${RUNTIME_TAG}")"
+  [[ "$repo" == "paperclip" ]] && code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 -I \
+    -H "Authorization: Bearer ${anon_token}" \
+    -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json" \
+    "https://registry-1.docker.io/v2/ileonelperea/${repo}/manifests/${PAPERCLIP_TAG}")"
+  if [[ "$code" != "401" ]]; then
+    echo "ERROR: pull anónimo de ileonelperea/${repo} responde ${code} (se esperaba 401): el repositorio NO es privado." >&2
+    echo "       Ponlo privado en Docker Hub ANTES de seguir; nada de este guion publica imágenes." >&2
+    exit 1
+  fi
+  echo "      ileonelperea/${repo}: pull anónimo → 401 (privado)"
+done
 
 echo "[5/5] Valores para values-ovh.yaml:"
 echo "      image.digest: ${PAPERCLIP_DIGEST}"

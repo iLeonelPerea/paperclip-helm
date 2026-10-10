@@ -2,7 +2,7 @@ apiVersion: v2
 name: paperclip
 description: Production-ready Paperclip AI agent orchestration platform for Kubernetes
 type: application
-version: 0.4.0
+version: 0.4.1
 # 2026-10-08 (ADR-158 §0-ter.5): clean reinstall at Paperclip v2026.1005.0 with
 # per-company Kubernetes sandbox execution and the platform's password-less entry.
 appVersion: "2026.1005.0"

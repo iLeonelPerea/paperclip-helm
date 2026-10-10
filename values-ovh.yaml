@@ -188,9 +188,10 @@ kubernetesExecution:
   runtimeClassName: ""
   rpcTimeoutMs: ""
   # Runtime image built from upstream docker/agent-runtime at v2026.1005.0
-  # (scripts/build-images.sh): ghcr.io/paperclipai/agent-runtime-* answers 404 to
-  # anonymous pulls, and sandbox namespaces have no pull secret, so this image is
-  # published PUBLIC (it holds only Ubuntu, Node, the Claude Code CLI and the shim).
+  # (scripts/build-images.sh; ghcr.io/paperclipai/agent-runtime-* answers 404 to
+  # anonymous pulls). It stays PRIVATE like every image of ours (decided 2026-10-09:
+  # nothing published): each sandbox namespace gets regcred and the provider's
+  # ServiceAccount carrying it (sandboxImagePullSecret below).
   # Only claude_local stays available on the instance.
   adapters:
     - adapterType: claude_local
@@ -206,6 +207,9 @@ kubernetesExecution:
   # Filled by the install script after provisioning (fase conexiones): the company
   # ids of Alebrije Plataforma, Alebrije and lafelabs, one sandbox namespace each.
   sandboxCompanyIds: []
+  # regcred (Vault ci/dockerhub, vault.imagePullSecret) + paperclip-tenant-sa in each
+  # sandbox namespace, so the private runtime image is pulled with our credentials.
+  sandboxImagePullSecret: true
 
 # =============================================================================
 # Password-less entry from the platform (ADR-158 §0-ter.4). companyId is the

@@ -14,6 +14,9 @@
 {{- if and .Values.kubernetesExecution.enabled (ne .Release.Namespace "paperclip") }}
 {{- fail "kubernetesExecution needs the release in namespace \"paperclip\": the sandbox provider hardcodes it (plugin.ts PAPERCLIP_SERVER_NAMESPACE) for the agents callback NetworkPolicy" }}
 {{- end }}
+{{- if and .Values.kubernetesExecution.enabled .Values.kubernetesExecution.sandboxImagePullSecret (not (and .Values.vault.enabled .Values.vault.imagePullSecret)) }}
+{{- fail "kubernetesExecution.sandboxImagePullSecret needs vault.enabled and vault.imagePullSecret (the pull secret each sandbox namespace receives)" }}
+{{- end }}
 {{- if and .Values.kubernetesExecution.enabled .Values.networkPolicy.enabled (not .Values.kubernetesExecution.apiServer.cidrs) }}
 {{- fail "kubernetesExecution with networkPolicy needs kubernetesExecution.apiServer.cidrs (the kubernetes Service endpoint) or the provider cannot reach the API" }}
 {{- end }}
