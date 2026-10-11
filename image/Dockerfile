@@ -135,31 +135,54 @@ RUN set -eu; \
 
 # Alebrije code patches (image/patches/*.patch, applied in name order). Each one
 # must apply cleanly to this exact base: `git apply --check` fails the build when
-# an upstream file moved, instead of shipping a stale copy of it. The server is
-# TypeScript run by tsx at boot (no compile step), so the patched modules are
-# loaded here with the same loader the official CMD uses.
+# an upstream file moved, instead of shipping a stale copy of it.
+# The server runs the COMPILED build (`node … server/dist/index.js`), not src/:
+# 2026.1005.0-k8s.3 patched only src/ and its route answered 404 in prod. So
+# every patched server/src/*.ts is compiled here with the server's own `tsc -p
+# tsconfig.json` (the same compiler and options as upstream's build: compiled
+# this way, 4052 of the unchanged files came out byte-identical to the shipped
+# dist/) into a sibling folder, so the source maps keep their relative paths,
+# and only those modules are copied into dist/. The checks read dist/.
 #   - 0001-admin-create-user.patch (ADR-115 Addendum D6, d6-5): POST
 #     /api/admin/users lets an instance admin create a user while public sign-up
-#     stays closed (PAPERCLIP_AUTH_DISABLE_SIGN_UP=true). Tested against the
-#     real Better Auth, access router and an embedded Postgres in its own
-#     server/src/__tests__/admin-user-create.integration.test.ts.
+#     stays closed (PAPERCLIP_AUTH_DISABLE_SIGN_UP=true). Its suite
+#     server/src/__tests__/admin-user-create.integration.test.ts runs against
+#     src/ or, with PAPERCLIP_TEST_BUILD=dist, against this dist/.
 COPY patches/ /tmp/alebrije-patches/
 RUN set -eu; \
     cd /app; \
-    applied=0; \
+    applied=0; : > /tmp/alebrije-patched-files; \
     for p in /tmp/alebrije-patches/*.patch; do \
       git apply --check "$p"; \
       git apply "$p"; \
+      git apply --numstat "$p" | awk '{print $3}' >> /tmp/alebrije-patched-files; \
       echo "applied $(basename "$p")"; applied=$((applied + 1)); \
     done; \
     [ "$applied" -ge 1 ] || { echo "ERROR: no patch applied from /tmp/alebrije-patches" >&2; exit 1; }; \
-    chown node:node server/src/auth/better-auth.ts server/src/routes/access.ts \
-      server/src/auth/admin-user-creator.ts server/src/__tests__/admin-user-create.integration.test.ts; \
+    xargs chown node:node < /tmp/alebrije-patched-files; \
+    cd /app/server; \
+    /app/node_modules/.bin/tsc -p tsconfig.json --outDir dist-alebrije; \
+    compiled=0; \
+    for src in $(grep -E '^server/src/.*\.ts$' /tmp/alebrije-patched-files | grep -v '/__tests__/' | sort -u); do \
+      rel="${src#server/src/}"; rel="${rel%.ts}"; \
+      for ext in .js .js.map .d.ts .d.ts.map; do \
+        test -f "dist-alebrije/$rel$ext" || { echo "ERROR: tsc emitted no dist-alebrije/$rel$ext" >&2; exit 1; }; \
+        install -m 0644 -o node -g node "dist-alebrije/$rel$ext" "dist/$rel$ext"; \
+      done; \
+      echo "compiled into dist: $rel"; compiled=$((compiled + 1)); \
+    done; \
+    rm -rf dist-alebrije /tmp/alebrije-patched-files; \
+    [ "$compiled" -ge 1 ] || { echo "ERROR: no patched server module was compiled into dist" >&2; exit 1; }; \
+    grep -q '"/admin/users", validate(createAdminUserSchema)' dist/routes/access.js \
+      || { echo "ERROR: dist/routes/access.js has no POST /admin/users" >&2; exit 1; }; \
+    grep -q 'registerAdminUserCreator(' dist/auth/better-auth.js \
+      || { echo "ERROR: dist/auth/better-auth.js does not register the user creator" >&2; exit 1; }; \
+    cd /app; \
     node --import ./server/node_modules/tsx/dist/loader.mjs -e " \
-      Promise.all([import('/app/server/src/auth/admin-user-creator.ts'), import('/app/server/src/auth/better-auth.ts'), import('/app/server/src/routes/access.ts')]) \
+      Promise.all([import('/app/server/dist/auth/admin-user-creator.js'), import('/app/server/dist/auth/better-auth.js'), import('/app/server/dist/routes/access.js')]) \
         .then(([c, b, a]) => { const ok = typeof c.createUserWithPassword === 'function' && typeof c.registerAdminUserCreator === 'function' && typeof b.createBetterAuthInstance === 'function' && typeof a.accessRoutes === 'function'; \
-          if (!ok) { console.error('ERROR: a patched module lost an export'); process.exit(1); } console.log('patched modules load'); process.exit(0); }, \
-          (e) => { console.error('ERROR: a patched module does not load:', e); process.exit(1); })"; \
+          if (!ok) { console.error('ERROR: a patched dist module lost an export'); process.exit(1); } console.log('patched dist modules load'); process.exit(0); }, \
+          (e) => { console.error('ERROR: a patched dist module does not load:', e); process.exit(1); })"; \
     rm -rf /tmp/alebrije-patches
 LABEL io.alebrije.paperclip.base="ghcr.io/paperclipai/paperclip:2026.1005.0" \
-      io.alebrije.paperclip.extra="kubernetes sandbox provider compiled in place (ADR-158 §0-ter.5); esbuild rebuilt with Go 1.26.9, proxy-addr 2.0.8, release version in place of the 0.3.1 placeholder; patch 0001 POST /api/admin/users (ADR-115 D6, d6-5)"
+      io.alebrije.paperclip.extra="kubernetes sandbox provider compiled in place (ADR-158 §0-ter.5); esbuild rebuilt with Go 1.26.9, proxy-addr 2.0.8, release version in place of the 0.3.1 placeholder; patch 0001 POST /api/admin/users (ADR-115 D6, d6-5), compiled into dist"

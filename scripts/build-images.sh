@@ -31,7 +31,7 @@ UPSTREAM_REPO="https://github.com/paperclipai/paperclip.git"
 UPSTREAM_TAG="v2026.1005.0"
 UPSTREAM_COMMIT="467125f"          # measured 2026-10-08 (git log -1 of the tag)
 REGISTRY="docker.io/ileonelperea"
-PAPERCLIP_TAG="${PAPERCLIP_TAG:-2026.1005.0-k8s.3}"
+PAPERCLIP_TAG="${PAPERCLIP_TAG:-2026.1005.0-k8s.4}"
 RUNTIME_TAG="${RUNTIME_TAG:-2026.1005.0-1}"
 WRITE_VALUES=0
 [[ "${1:-}" == "--escribir-values" ]] && WRITE_VALUES=1

@@ -1,9 +1,9 @@
 diff --git a/server/src/__tests__/admin-user-create.integration.test.ts b/server/src/__tests__/admin-user-create.integration.test.ts
 new file mode 100644
-index 0000000..05e3bdf
+index 0000000..b516157
 --- /dev/null
 +++ b/server/src/__tests__/admin-user-create.integration.test.ts
-@@ -0,0 +1,223 @@
+@@ -0,0 +1,242 @@
 +/**
 + * Alebrije patch (ADR-115 D6, d6-5): POST /api/admin/users creates a user while
 + * public sign-up stays closed. Driven through the real Better Auth instance,
@@ -15,6 +15,11 @@ index 0000000..05e3bdf
 + * regular user:
 + *
 + *   su node -s /bin/sh -c "cd /app/server && vitest run src/__tests__/admin-user-create.integration.test.ts"
++ *
++ * The server runs the COMPILED build (`node … server/dist/index.js`), not src/.
++ * With PAPERCLIP_TEST_BUILD=dist the same suite loads the router and Better Auth
++ * from dist/, the artifact the image ships (image/Dockerfile compiles the patched
++ * files into it); an image whose dist/ lacks the patch fails here.
 + */
 +
 +import express from "express";
@@ -26,7 +31,6 @@ index 0000000..05e3bdf
 +  getEmbeddedPostgresTestSupport,
 +  startEmbeddedPostgresTestDatabase,
 +} from "./helpers/embedded-postgres.js";
-+import { createBetterAuthHandler, createBetterAuthInstance } from "../auth/better-auth.js";
 +import type { Config } from "../config.js";
 +
 +const ORIGIN = "http://127.0.0.1:41998";
@@ -47,6 +51,23 @@ index 0000000..05e3bdf
 +}
 +
 +type TestActor = "instance-admin" | "board-user" | "agent";
++
++// The router, the error handler and Better Auth come from ONE build, so the
++// creator the router calls is the one Better Auth registered.
++async function loadServerModules() {
++  if (process.env.PAPERCLIP_TEST_BUILD === "dist") {
++    return Promise.all([
++      import("../../dist/routes/access.js"),
++      import("../../dist/middleware/index.js"),
++      import("../../dist/auth/better-auth.js"),
++    ]);
++  }
++  return Promise.all([
++    import("../routes/access.js"),
++    import("../middleware/index.js"),
++    import("../auth/better-auth.js"),
++  ]);
++}
 +
 +function actorFor(kind: TestActor): Express.Request["actor"] {
 +  if (kind === "instance-admin") {
@@ -94,10 +115,8 @@ index 0000000..05e3bdf
 +    database = await startEmbeddedPostgresTestDatabase("paperclip-admin-user-create-");
 +    db = createDb(database.connectionString);
 +
-+    const [{ accessRoutes }, { errorHandler }] = await Promise.all([
-+      import("../routes/access.js"),
-+      import("../middleware/index.js"),
-+    ]);
++    const [{ accessRoutes }, { errorHandler }, { createBetterAuthHandler, createBetterAuthInstance }] =
++      await loadServerModules();
 +    const auth = createBetterAuthInstance(db, testConfig(), [ORIGIN]);
 +    app = express();
 +    // As createApp mounts it: Better Auth first, reading the raw body itself.
