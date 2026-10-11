@@ -132,5 +132,34 @@ RUN set -eu; \
       node -e "const fs = require('fs'); const [f, v] = process.argv.slice(1); const j = JSON.parse(fs.readFileSync(f, 'utf8')); if (j.version !== '0.3.1') { console.error('ERROR: ' + f + ' no longer carries the 0.3.1 placeholder (' + j.version + '): review before rewriting'); process.exit(1); } j.version = v; fs.writeFileSync(f, JSON.stringify(j, null, 2) + '\n');" "$p" "${PAPERCLIP_RELEASE}"; \
     done; \
     rm -rf /paperclip/.cache/node/corepack
+
+# Alebrije code patches (image/patches/*.patch, applied in name order). Each one
+# must apply cleanly to this exact base: `git apply --check` fails the build when
+# an upstream file moved, instead of shipping a stale copy of it. The server is
+# TypeScript run by tsx at boot (no compile step), so the patched modules are
+# loaded here with the same loader the official CMD uses.
+#   - 0001-admin-create-user.patch (ADR-115 Addendum D6, d6-5): POST
+#     /api/admin/users lets an instance admin create a user while public sign-up
+#     stays closed (PAPERCLIP_AUTH_DISABLE_SIGN_UP=true). Tested against the
+#     real Better Auth, access router and an embedded Postgres in its own
+#     server/src/__tests__/admin-user-create.integration.test.ts.
+COPY patches/ /tmp/alebrije-patches/
+RUN set -eu; \
+    cd /app; \
+    applied=0; \
+    for p in /tmp/alebrije-patches/*.patch; do \
+      git apply --check "$p"; \
+      git apply "$p"; \
+      echo "applied $(basename "$p")"; applied=$((applied + 1)); \
+    done; \
+    [ "$applied" -ge 1 ] || { echo "ERROR: no patch applied from /tmp/alebrije-patches" >&2; exit 1; }; \
+    chown node:node server/src/auth/better-auth.ts server/src/routes/access.ts \
+      server/src/auth/admin-user-creator.ts server/src/__tests__/admin-user-create.integration.test.ts; \
+    node --import ./server/node_modules/tsx/dist/loader.mjs -e " \
+      Promise.all([import('/app/server/src/auth/admin-user-creator.ts'), import('/app/server/src/auth/better-auth.ts'), import('/app/server/src/routes/access.ts')]) \
+        .then(([c, b, a]) => { const ok = typeof c.createUserWithPassword === 'function' && typeof c.registerAdminUserCreator === 'function' && typeof b.createBetterAuthInstance === 'function' && typeof a.accessRoutes === 'function'; \
+          if (!ok) { console.error('ERROR: a patched module lost an export'); process.exit(1); } console.log('patched modules load'); process.exit(0); }, \
+          (e) => { console.error('ERROR: a patched module does not load:', e); process.exit(1); })"; \
+    rm -rf /tmp/alebrije-patches
 LABEL io.alebrije.paperclip.base="ghcr.io/paperclipai/paperclip:2026.1005.0" \
-      io.alebrije.paperclip.extra="kubernetes sandbox provider compiled in place (ADR-158 §0-ter.5); esbuild rebuilt with Go 1.26.9, proxy-addr 2.0.8, release version in place of the 0.3.1 placeholder"
+      io.alebrije.paperclip.extra="kubernetes sandbox provider compiled in place (ADR-158 §0-ter.5); esbuild rebuilt with Go 1.26.9, proxy-addr 2.0.8, release version in place of the 0.3.1 placeholder; patch 0001 POST /api/admin/users (ADR-115 D6, d6-5)"

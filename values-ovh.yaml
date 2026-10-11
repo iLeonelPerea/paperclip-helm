@@ -26,9 +26,9 @@ timezone: "America/Mexico_City"
 # sandboxes. Pinned by digest (ADR-158 M13); the chart refuses an empty digest.
 image:
   repository: docker.io/ileonelperea/paperclip
-  tag: "2026.1005.0-k8s.2"
+  tag: "2026.1005.0-k8s.3"
   # Filled by scripts/build-images.sh (prints the pushed digest).
-  digest: "sha256:6f7cc3f768bf61b6823aaf34d288bf9d81393348da8a2605737a4a6409fca517"
+  digest: "sha256:cf45a8bb9eb10162a19c325fa9d4be246902ee1bb0f62acd59da01a2b4fbaef4"
   requireDigest: true
   pullPolicy: IfNotPresent
   pullSecrets:

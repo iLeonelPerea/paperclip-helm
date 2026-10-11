@@ -31,7 +31,7 @@ UPSTREAM_REPO="https://github.com/paperclipai/paperclip.git"
 UPSTREAM_TAG="v2026.1005.0"
 UPSTREAM_COMMIT="467125f"          # measured 2026-10-08 (git log -1 of the tag)
 REGISTRY="docker.io/ileonelperea"
-PAPERCLIP_TAG="${PAPERCLIP_TAG:-2026.1005.0-k8s.2}"
+PAPERCLIP_TAG="${PAPERCLIP_TAG:-2026.1005.0-k8s.3}"
 RUNTIME_TAG="${RUNTIME_TAG:-2026.1005.0-1}"
 WRITE_VALUES=0
 [[ "${1:-}" == "--escribir-values" ]] && WRITE_VALUES=1
@@ -54,16 +54,29 @@ got="$(git -C "$WORK/pc" rev-parse --short=7 HEAD)"
 echo "      ${UPSTREAM_TAG} = ${got}"
 
 echo "[2/5] agent-runtime base + claude (buildx-bake de upstream, linux/amd64+arm64, push)..."
-# bake reads REGISTRY and VERSION from the environment (HCL variables).
-( cd "$WORK/pc" && export REGISTRY && export VERSION="$RUNTIME_TAG" && \
-    docker buildx bake -f docker/agent-runtime/buildx-bake.hcl --push \
-      --set "*.platform=linux/amd64,linux/arm64" \
-      --set "base.cache-from=type=registry,ref=${REGISTRY}/agent-runtime-base:buildcache" \
-      --set "base.cache-to=type=registry,ref=${REGISTRY}/agent-runtime-base:buildcache,mode=max" \
-      --set "claude.cache-from=type=registry,ref=${REGISTRY}/agent-runtime-claude:buildcache" \
-      --set "claude.cache-to=type=registry,ref=${REGISTRY}/agent-runtime-claude:buildcache,mode=max" \
-      base claude )
 RUNTIME_REF="${REGISTRY}/agent-runtime-claude:${RUNTIME_TAG}"
+# A runtime tag is a release: it is built once. Upstream's recipe installs
+# @anthropic-ai/claude-code@latest, so rebuilding the SAME tag silently swapped
+# the agents' Claude Code and moved the tag (measured 2026-10-11: building
+# paperclip k8s.3 rebuilt agent-runtime-claude:2026.1005.0-1, layers 4-5 new;
+# the tag was put back on the reviewed digest). To change the runtime, raise
+# RUNTIME_TAG. Only "not found" builds it; any other inspect error stops here.
+if inspect_err="$(docker buildx imagetools inspect "$RUNTIME_REF" 2>&1 >/dev/null)"; then
+  echo "      ${RUNTIME_REF} ya existe: no se reconstruye (para cambiarlo, sube RUNTIME_TAG)."
+elif [[ "$inspect_err" == *"not found"* ]]; then
+  # bake reads REGISTRY and VERSION from the environment (HCL variables).
+  ( cd "$WORK/pc" && export REGISTRY && export VERSION="$RUNTIME_TAG" && \
+      docker buildx bake -f docker/agent-runtime/buildx-bake.hcl --push \
+        --set "*.platform=linux/amd64,linux/arm64" \
+        --set "base.cache-from=type=registry,ref=${REGISTRY}/agent-runtime-base:buildcache" \
+        --set "base.cache-to=type=registry,ref=${REGISTRY}/agent-runtime-base:buildcache,mode=max" \
+        --set "claude.cache-from=type=registry,ref=${REGISTRY}/agent-runtime-claude:buildcache" \
+        --set "claude.cache-to=type=registry,ref=${REGISTRY}/agent-runtime-claude:buildcache,mode=max" \
+        base claude )
+else
+  echo "ERROR: no pude saber si ${RUNTIME_REF} existe: ${inspect_err}" >&2
+  exit 1
+fi
 RUNTIME_DIGEST="$(digest_of "$RUNTIME_REF")"
 echo "      ${RUNTIME_REF}@${RUNTIME_DIGEST}"
 

@@ -1,0 +1,416 @@
+diff --git a/server/src/__tests__/admin-user-create.integration.test.ts b/server/src/__tests__/admin-user-create.integration.test.ts
+new file mode 100644
+index 0000000..05e3bdf
+--- /dev/null
++++ b/server/src/__tests__/admin-user-create.integration.test.ts
+@@ -0,0 +1,223 @@
++/**
++ * Alebrije patch (ADR-115 D6, d6-5): POST /api/admin/users creates a user while
++ * public sign-up stays closed. Driven through the real Better Auth instance,
++ * the real access router and a migrated embedded Postgres — the same harness as
++ * better-auth-credential-signup.integration.test.ts.
++ *
++ * It never skips: embedded Postgres refuses to run as root, and a suite that
++ * quietly skips there would report green without testing anything. Run it as a
++ * regular user:
++ *
++ *   su node -s /bin/sh -c "cd /app/server && vitest run src/__tests__/admin-user-create.integration.test.ts"
++ */
++
++import express from "express";
++import request from "supertest";
++import { afterAll, beforeAll, describe, expect, it } from "vitest";
++import { eq } from "drizzle-orm";
++import { authAccounts, authSessions, authUsers, createDb } from "@paperclipai/db";
++import {
++  getEmbeddedPostgresTestSupport,
++  startEmbeddedPostgresTestDatabase,
++} from "./helpers/embedded-postgres.js";
++import { createBetterAuthHandler, createBetterAuthInstance } from "../auth/better-auth.js";
++import type { Config } from "../config.js";
++
++const ORIGIN = "http://127.0.0.1:41998";
++const PASSWORD = "placeholder-test-password-not-a-secret";
++const CREDENTIAL_ISSUER = "local:credential";
++
++function testConfig(): Config {
++  // Public sign-up CLOSED, as in prod (PAPERCLIP_AUTH_DISABLE_SIGN_UP=true).
++  return {
++    deploymentMode: "authenticated",
++    deploymentExposure: "private",
++    authBaseUrlMode: "explicit",
++    authPublicBaseUrl: ORIGIN,
++    authDisableSignUp: true,
++    allowedHostnames: ["127.0.0.1"],
++    port: 41998,
++  } as unknown as Config;
++}
++
++type TestActor = "instance-admin" | "board-user" | "agent";
++
++function actorFor(kind: TestActor): Express.Request["actor"] {
++  if (kind === "instance-admin") {
++    return {
++      type: "board",
++      userId: "instance-admin-1",
++      source: "local_implicit",
++      companyIds: [],
++      memberships: [],
++      isInstanceAdmin: true,
++    } as unknown as Express.Request["actor"];
++  }
++  if (kind === "board-user") {
++    // A signed-in board user with no instance-admin role row: the router asks the
++    // database and must refuse.
++    return {
++      type: "board",
++      userId: "plain-board-user-1",
++      source: "session",
++      companyIds: ["company-1"],
++      memberships: [],
++      isInstanceAdmin: false,
++    } as unknown as Express.Request["actor"];
++  }
++  return { type: "agent", agentId: "agent-1", companyId: "company-1" } as unknown as Express.Request["actor"];
++}
++
++describe("POST /api/admin/users with public sign-up closed", () => {
++  let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
++  let db!: ReturnType<typeof createDb>;
++  let app!: express.Express;
++  const originalEnv = {
++    secret: process.env.BETTER_AUTH_SECRET,
++    rateLimit: process.env.PAPERCLIP_AUTH_RATE_LIMIT_ENABLED,
++  };
++
++  beforeAll(async () => {
++    const support = await getEmbeddedPostgresTestSupport();
++    if (!support.supported) {
++      throw new Error(`embedded Postgres unavailable (${support.reason ?? "no reason given"}); run as a non-root user`);
++    }
++    process.env.BETTER_AUTH_SECRET = "placeholder-better-auth-secret-for-tests-only";
++    process.env.PAPERCLIP_AUTH_RATE_LIMIT_ENABLED = "false";
++
++    database = await startEmbeddedPostgresTestDatabase("paperclip-admin-user-create-");
++    db = createDb(database.connectionString);
++
++    const [{ accessRoutes }, { errorHandler }] = await Promise.all([
++      import("../routes/access.js"),
++      import("../middleware/index.js"),
++    ]);
++    const auth = createBetterAuthInstance(db, testConfig(), [ORIGIN]);
++    app = express();
++    // As createApp mounts it: Better Auth first, reading the raw body itself.
++    app.all("/api/auth/{*authPath}", createBetterAuthHandler(auth));
++    app.use(express.json());
++    app.use((req, _res, next) => {
++      req.actor = actorFor((req.header("x-test-actor") as TestActor) ?? "instance-admin");
++      next();
++    });
++    app.use("/api", accessRoutes(db, {
++      deploymentMode: "authenticated",
++      deploymentExposure: "private",
++      bindHost: "127.0.0.1",
++      allowedHostnames: ["127.0.0.1"],
++    }));
++    app.use(errorHandler);
++  }, 60_000);
++
++  afterAll(async () => {
++    await database?.cleanup();
++    if (originalEnv.secret === undefined) delete process.env.BETTER_AUTH_SECRET;
++    else process.env.BETTER_AUTH_SECRET = originalEnv.secret;
++    if (originalEnv.rateLimit === undefined) delete process.env.PAPERCLIP_AUTH_RATE_LIMIT_ENABLED;
++    else process.env.PAPERCLIP_AUTH_RATE_LIMIT_ENABLED = originalEnv.rateLimit;
++  });
++
++  it("keeps public sign-up closed", async () => {
++    const res = await request(app)
++      .post("/api/auth/sign-up/email")
++      .set("origin", ORIGIN)
++      .send({ email: "outsider@example.com", password: PASSWORD, name: "Outsider" });
++
++    expect(res.status, JSON.stringify(res.body)).toBe(400);
++    expect(res.body?.code).toBe("EMAIL_PASSWORD_SIGN_UP_DISABLED");
++    expect(await db.select().from(authUsers)).toHaveLength(0);
++  });
++
++  it("creates a user the instance admin asked for, with no session, who can then sign in", async () => {
++    const res = await request(app)
++      .post("/api/admin/users")
++      .send({ email: "Tenant-User@Example.com", password: PASSWORD, name: "Tenant user" });
++
++    expect(res.status, JSON.stringify(res.body)).toBe(201);
++    expect(res.body).toMatchObject({ email: "tenant-user@example.com", name: "Tenant user" });
++    const userId = res.body.id as string;
++    expect(userId).toBeTruthy();
++
++    const accounts = await db.select().from(authAccounts).where(eq(authAccounts.userId, userId));
++    expect(accounts).toHaveLength(1);
++    expect(accounts[0]).toMatchObject({ providerId: "credential", issuer: CREDENTIAL_ISSUER });
++    expect(accounts[0]?.password).toBeTruthy();
++    expect(await db.select().from(authSessions)).toHaveLength(0);
++
++    const signIn = await request(app)
++      .post("/api/auth/sign-in/email")
++      .set("origin", ORIGIN)
++      .send({ email: "tenant-user@example.com", password: PASSWORD });
++    expect(signIn.status, JSON.stringify(signIn.body)).toBe(200);
++    expect(signIn.body?.user?.id).toBe(userId);
++  });
++
++  it("answers an existing e-mail with 409 and that user's id", async () => {
++    const [existing] = await db.select().from(authUsers).where(eq(authUsers.email, "tenant-user@example.com"));
++    const res = await request(app)
++      .post("/api/admin/users")
++      .send({ email: "tenant-user@example.com", password: PASSWORD, name: "Again" });
++
++    expect(res.status, JSON.stringify(res.body)).toBe(409);
++    expect(res.body.details).toMatchObject({ code: "user_exists", userId: existing?.id });
++    expect(await db.select().from(authUsers)).toHaveLength(1);
++  });
++
++  it("lets only one of three simultaneous creates of the same e-mail write a user", async () => {
++    const send = () =>
++      request(app)
++        .post("/api/admin/users")
++        .send({ email: "race@example.com", password: PASSWORD, name: "Race" });
++    const results = await Promise.all([send(), send(), send()]);
++    const statuses = results.map((r) => r.status).sort();
++
++    expect(statuses, JSON.stringify(results.map((r) => r.body))).toEqual([201, 409, 409]);
++    for (const r of results.filter((x) => x.status === 409)) {
++      expect(["user_exists", "user_create_in_progress"]).toContain(r.body.details?.code);
++    }
++    const rows = await db.select().from(authUsers).where(eq(authUsers.email, "race@example.com"));
++    expect(rows).toHaveLength(1);
++    expect(results.find((r) => r.status === 201)?.body.id).toBe(rows[0]?.id);
++  });
++
++  it("turns Better Auth's own validation into a 400", async () => {
++    const res = await request(app)
++      .post("/api/admin/users")
++      .send({ email: "short@example.com", password: "short", name: "Short" });
++
++    expect(res.status, JSON.stringify(res.body)).toBe(400);
++    expect(res.body.details).toMatchObject({ code: "PASSWORD_TOO_SHORT" });
++    expect(await db.select().from(authUsers).where(eq(authUsers.email, "short@example.com"))).toHaveLength(0);
++  });
++
++  it("refuses anyone who is not an instance admin", async () => {
++    const asBoardUser = await request(app)
++      .post("/api/admin/users")
++      .set("x-test-actor", "board-user")
++      .send({ email: "nope@example.com", password: PASSWORD, name: "Nope" });
++    expect(asBoardUser.status, JSON.stringify(asBoardUser.body)).toBe(403);
++
++    const asAgent = await request(app)
++      .post("/api/admin/users")
++      .set("x-test-actor", "agent")
++      .send({ email: "nope@example.com", password: PASSWORD, name: "Nope" });
++    expect(asAgent.status, JSON.stringify(asAgent.body)).toBe(401);
++
++    expect(await db.select().from(authUsers).where(eq(authUsers.email, "nope@example.com"))).toHaveLength(0);
++  });
++
++  it("is floored with the rest of user administration when the operator hides it", async () => {
++    process.env.PAPERCLIP_HIDDEN_SETTINGS = "instance.access";
++    try {
++      const res = await request(app)
++        .post("/api/admin/users")
++        .send({ email: "hidden@example.com", password: PASSWORD, name: "Hidden" });
++      expect(res.status, JSON.stringify(res.body)).toBe(403);
++      expect(res.body.details).toMatchObject({ code: "settings_operator_managed" });
++    } finally {
++      delete process.env.PAPERCLIP_HIDDEN_SETTINGS;
++    }
++    expect(await db.select().from(authUsers).where(eq(authUsers.email, "hidden@example.com"))).toHaveLength(0);
++  });
++});
+diff --git a/server/src/auth/admin-user-creator.ts b/server/src/auth/admin-user-creator.ts
+new file mode 100644
+index 0000000..f3fe4c7
+--- /dev/null
++++ b/server/src/auth/admin-user-creator.ts
+@@ -0,0 +1,116 @@
++/**
++ * Alebrije patch (ADR-115 Addendum D6, d6-5): an instance admin creates a user
++ * while public sign-up stays closed (PAPERCLIP_AUTH_DISABLE_SIGN_UP=true), so a
++ * tenant's Paperclip user no longer needs the registration window.
++ *
++ * createBetterAuthInstance registers here a second Better Auth instance built
++ * from the SAME config as the public one — same Drizzle adapter, password
++ * hashing, email/password validation and account issuer as
++ * POST /api/auth/sign-up/email — with sign-up enabled and auto sign-in off, so
++ * the new user gets no session. That instance is never mounted on an HTTP
++ * handler: POST /api/admin/users (routes/access.ts, instance admins only) is its
++ * only caller.
++ */
++import { eq, sql } from "drizzle-orm";
++import { z } from "zod";
++import type { Db } from "@paperclipai/db";
++import { authUsers } from "@paperclipai/db";
++import { badRequest, conflict } from "../errors.js";
++
++// Shape only; Better Auth validates the e-mail format and the password length
++// (8..128 by default) exactly as it does on public sign-up.
++export const createAdminUserSchema = z
++  .object({
++    email: z.string().min(1).max(320),
++    password: z.string().min(1).max(1024),
++    name: z.string().trim().min(1).max(200),
++  })
++  .strict();
++
++type SignUpEmailBody = z.infer<typeof createAdminUserSchema>;
++
++type UserCreationAuth = {
++  api: {
++    signUpEmail: (input: { body: SignUpEmailBody }) => Promise<unknown>;
++  };
++};
++
++export type CreatedUser = {
++  id: string;
++  email: string | null;
++  name: string | null;
++  image: string | null;
++};
++
++type UserReader = Pick<Db, "select">;
++
++let userCreationAuth: UserCreationAuth | null = null;
++
++export function registerAdminUserCreator(auth: UserCreationAuth): void {
++  userCreationAuth = auth;
++}
++
++async function findUser(db: UserReader, column: "id" | "email", value: string): Promise<CreatedUser | null> {
++  const rows = await db
++    .select({ id: authUsers.id, email: authUsers.email, name: authUsers.name, image: authUsers.image })
++    .from(authUsers)
++    .where(eq(column === "id" ? authUsers.id : authUsers.email, value))
++    .limit(1);
++  return rows[0] ?? null;
++}
++
++/**
++ * Creates the user and its credential account. An e-mail that already has a
++ * user is a 409 carrying that user's id.
++ *
++ * The "user" table has no unique index on email (packages/db/src/schema/auth.ts)
++ * and Better Auth answers a duplicate with a generic success when auto sign-in
++ * is off (it hides which e-mails exist): three simultaneous creates of one
++ * e-mail, measured, wrote three users. So the check and the sign-up run under a
++ * transaction-scoped advisory lock on the e-mail, keyed like the rest of the
++ * server's locks (services/onboarding-seed.ts). It is the TRY variant on
++ * purpose: Better Auth writes through its own pool connection while this
++ * transaction holds one, so creates queued on the lock could take every
++ * connection and starve the holder. A create that finds the lock taken is a 409
++ * too. The returned id is read back as a last guard against the generic answer.
++ */
++export async function createUserWithPassword(db: Db, input: SignUpEmailBody): Promise<CreatedUser> {
++  const auth = userCreationAuth;
++  if (!auth) {
++    throw new Error("admin user creator is not registered: createBetterAuthInstance has not run");
++  }
++  const email = input.email.toLowerCase();
++  return db.transaction(async (tx) => {
++    const lock = (await tx.execute(
++      sql`select pg_try_advisory_xact_lock(hashtextextended(${`paperclip:admin-create-user:${email}`}, 0)) as locked`,
++    )) as unknown as Array<{ locked: boolean }>;
++    if (lock[0]?.locked !== true) {
++      throw conflict("A create for this e-mail is already running", { code: "user_create_in_progress", userId: null });
++    }
++    const existing = await findUser(tx, "email", email);
++    if (existing) {
++      throw conflict("User already exists", { code: "user_exists", userId: existing.id });
++    }
++    let result: { user?: { id?: string } } | null;
++    try {
++      result = (await auth.api.signUpEmail({
++        body: { email, password: input.password, name: input.name },
++      })) as { user?: { id?: string } } | null;
++    } catch (err) {
++      // Better Auth's own validation (INVALID_EMAIL, PASSWORD_TOO_SHORT, ...) is a
++      // better-call APIError with statusCode 400: the caller's mistake, not a 500.
++      const apiError = err as { name?: string; statusCode?: number; body?: { message?: string; code?: string } };
++      if (apiError?.name === "APIError" && apiError.statusCode === 400) {
++        throw badRequest(apiError.body?.message ?? "Invalid user", { code: apiError.body?.code ?? null });
++      }
++      throw err;
++    }
++    const userId = result?.user?.id;
++    const created = userId ? await findUser(tx, "id", userId) : null;
++    if (!created) {
++      const raced = await findUser(tx, "email", email);
++      throw conflict("User already exists", { code: "user_exists", userId: raced?.id ?? null });
++    }
++    return created;
++  });
++}
+diff --git a/server/src/auth/better-auth.ts b/server/src/auth/better-auth.ts
+index 6fd400a..6eab5d5 100644
+--- a/server/src/auth/better-auth.ts
++++ b/server/src/auth/better-auth.ts
+@@ -12,6 +12,7 @@ import {
+ } from "@paperclipai/db";
+ import type { Config } from "../config.js";
+ import { resolvePaperclipInstanceId } from "../home-paths.js";
++import { registerAdminUserCreator } from "./admin-user-creator.js";
+ import {
+   workspaceLoginHandoffPlugin,
+   type WorkspaceHandoffExpectedIdentity,
+@@ -309,6 +310,18 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
+     delete (authConfig as { baseURL?: string }).baseURL;
+   }
+ 
++  // Alebrije patch (ADR-115 D6, d6-5), see auth/admin-user-creator.ts: the same
++  // config with sign-up enabled and no auto sign-in, used only by
++  // POST /api/admin/users and never mounted on a handler. The workspace-handoff
++  // plugin is left out: it serves an HTTP exchange this instance never exposes.
++  registerAdminUserCreator(
++    betterAuth({
++      ...authConfig,
++      plugins: [],
++      emailAndPassword: { ...authConfig.emailAndPassword, disableSignUp: false, autoSignIn: false },
++    }),
++  );
++
+   const defaultAuth = betterAuth(authConfig);
+   const supportsManagedLoopbackAuth = Boolean(
+     !disableSecureCookies &&
+diff --git a/server/src/routes/access.ts b/server/src/routes/access.ts
+index d35c458..d77adbf 100644
+--- a/server/src/routes/access.ts
++++ b/server/src/routes/access.ts
+@@ -99,6 +99,7 @@ import {
+   findReusableHumanJoinRequest,
+ } from "../lib/join-request-dedupe.js";
+ import { assertAuthenticated, assertCompanyAccess } from "./authz.js";
++import { createAdminUserSchema, createUserWithPassword } from "../auth/admin-user-creator.js";
+ import {
+   claimBoardOwnership,
+   inspectBoardClaimChallenge
+@@ -4666,6 +4667,21 @@ export function accessRoutes(
+     }
+   );
+ 
++  // Alebrije patch (ADR-115 D6, d6-5): instance admins create users while
++  // public sign-up stays closed (auth/admin-user-creator.ts). The user gets no
++  // session and no company; company access is granted afterwards through
++  // PUT /admin/users/:userId/company-access, like for any other user.
++  router.post(
++    "/admin/users",
++    validate(createAdminUserSchema),
++    async (req, res) => {
++      await assertInstanceAdmin(req);
++      assertAccessAdminVisible();
++      const created = await createUserWithPassword(db, req.body);
++      res.status(201).json(toUserProfile(created));
++    }
++  );
++
+   router.get("/admin/users", async (req, res) => {
+     await assertInstanceAdmin(req);
+     assertAccessAdminVisible();

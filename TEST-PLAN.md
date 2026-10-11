@@ -187,6 +187,37 @@ helm template paperclip . | grep -A 5 'initContainers:' | head -10
 - [ ] seccompProfile set to RuntimeDefault
 - [ ] Init containers present (if applicable)
 
+### 0.7 — Code patches of our image (`image/patches/`)
+
+`image/Dockerfile` applies every patch with `git apply --check` first (a moved
+upstream file fails the build) and loads the patched modules with the server's
+tsx loader. The patch tests run against the BUILT image, in a pod of the local
+Docker Desktop cluster (no `docker run`): pull its linux/arm64 variant, import it
+into the kind node, then run the suites as the `node` user (embedded Postgres
+refuses root; the suite throws instead of skipping).
+
+```bash
+IMG=docker.io/ileonelperea/paperclip@<digest from build-images.sh>
+docker pull --platform linux/arm64 "$IMG" && docker tag "$IMG" paperclip-lab:test
+docker save --platform linux/arm64 paperclip-lab:test \
+  | docker exec -i desktop-control-plane ctr -n k8s.io images import --platform linux/arm64 -
+kubectl --context docker-desktop -n paperclip-lab run pc-lab --image=docker.io/library/paperclip-lab:test \
+  --image-pull-policy=Never --restart=Never --command -- sleep 3600
+kubectl --context docker-desktop -n paperclip-lab exec pc-lab -- su node -s /bin/sh -c \
+  "cd /app/server && /app/node_modules/.bin/vitest run src/__tests__/admin-user-create.integration.test.ts"
+```
+
+**Expected:** `admin-user-create.integration.test.ts` 7/7 (patch 0001: public
+sign-up stays closed; the instance admin creates a usable user with no session;
+409 for an existing e-mail and for simultaneous creates; 400 for Better Auth's own
+validation; 403/401 for anyone else; floored with `instance.access`). Run the
+upstream auth and access suites too (`access-*`, `auth-*`, `authz-*`,
+`better-auth*`, `board-claim`, `first-admin-claim`): 2026.1005.0-k8s.3 gave 15
+files, 180/180.
+
+- [ ] Patch suite green against the built image
+- [ ] Upstream auth and access suites green against the built image
+
 ---
 
 ## Phase 1 — Deployment to Docker Desktop K8s
