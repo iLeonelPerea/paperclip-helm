@@ -1,0 +1,39 @@
+diff --git a/docker/agent-runtime/Dockerfile.base b/docker/agent-runtime/Dockerfile.base
+index 335edca..49cc327 100644
+--- a/docker/agent-runtime/Dockerfile.base
++++ b/docker/agent-runtime/Dockerfile.base
+@@ -1,13 +1,17 @@
+ # syntax=docker/dockerfile:1.6
+ ARG NODE_VERSION=24
+-ARG TARGETARCH
+ 
+ # ---------- Stage 1: build agent-shim ----------
++# Alebrije patch (runtime-0001): no global `ARG TARGETARCH`. Declared before the first FROM with no value, it shadowed
++# BuildKit's automatic platform arg with an empty one inside this stage, so `${TARGETARCH:-amd64}` built an x86-64 shim
++# into the linux/arm64 image too (measured 2026-10-13 on a Raspberry Pi 4: "Exec format error", rc=126, and every
++# agent run died at setup). Without the fallback, an empty TARGETARCH fails the build instead of shipping the wrong
++# architecture.
+ FROM golang:1.25-bookworm AS shim-build
+ ARG TARGETARCH
+ WORKDIR /src
+ COPY tools/agent-shim/ ./
+-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} \
++RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:?TARGETARCH is empty} \
+     go build -ldflags='-s -w' -o /out/paperclip-agent-shim .
+ 
+ # ---------- Stage 2: runtime base image ----------
+diff --git a/docker/agent-runtime/Dockerfile.claude b/docker/agent-runtime/Dockerfile.claude
+index 1511ba6..b93b878 100644
+--- a/docker/agent-runtime/Dockerfile.claude
++++ b/docker/agent-runtime/Dockerfile.claude
+@@ -3,7 +3,9 @@ ARG BASE_TAG=dev
+ FROM paperclipai/agent-runtime-base:${BASE_TAG}
+ 
+ USER root
+-RUN npm install -g @anthropic-ai/claude-code@latest \
++# Alebrije patch (runtime-0001): the reviewed Claude Code version, never @latest. A floating version changed the
++# agents' CLI on every rebuild of the same tag (scripts/build-images.sh refuses floating tags for the same reason).
++RUN npm install -g @anthropic-ai/claude-code@2.1.296 \
+     && { chown -R 1000:1000 /usr/lib/node_modules || true; }
+ 
+ # @anthropic-ai/claude-code installs as 'claude', but the shim expects 'claude-code'.

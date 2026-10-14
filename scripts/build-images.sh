@@ -16,6 +16,13 @@
 #        (kubernetesExecution.sandboxImagePullSecret). New repositories of this
 #        account are born private (0 public repositories, measured 2026-10-09);
 #        step 4 refuses to continue if this one is not.
+#      The upstream recipe is PATCHED before the build (image/runtime-patches/*.patch,
+#      in name order, `git apply --check` first). 0001 builds the shim for each
+#      platform: upstream's global `ARG TARGETARCH` shipped an x86-64 shim inside the
+#      linux/arm64 image, so every agent run on a Raspberry Pi died with "Exec format
+#      error" (measured 2026-10-13, agent-runtime-claude:2026.1005.0-1). It also pins
+#      Claude Code instead of @latest. Step 2b checks every platform of the image:
+#      the shim's ELF machine and the Claude Code version.
 #
 # Multi-arch, the Alebrije standard (docker platform guard): linux/amd64 (the OVH
 # node) + linux/arm64 (local M-series), with registry build cache (M160). Never a
@@ -32,7 +39,10 @@ UPSTREAM_TAG="v2026.1005.0"
 UPSTREAM_COMMIT="467125f"          # measured 2026-10-08 (git log -1 of the tag)
 REGISTRY="docker.io/ileonelperea"
 PAPERCLIP_TAG="${PAPERCLIP_TAG:-2026.1005.0-k8s.4}"
-RUNTIME_TAG="${RUNTIME_TAG:-2026.1005.0-1}"
+# 2026.1005.0-1 has the x86-64 shim in its arm64 image (step 2b rejects it); -2 is built with runtime-patches/0001.
+RUNTIME_TAG="${RUNTIME_TAG:-2026.1005.0-2}"
+# The Claude Code that image/runtime-patches/0001 installs (the reviewed one: what -1 shipped). Step 2b checks it.
+CLAUDE_CODE_VERSION="2.1.296"
 WRITE_VALUES=0
 [[ "${1:-}" == "--escribir-values" ]] && WRITE_VALUES=1
 
@@ -64,6 +74,13 @@ RUNTIME_REF="${REGISTRY}/agent-runtime-claude:${RUNTIME_TAG}"
 if inspect_err="$(docker buildx imagetools inspect "$RUNTIME_REF" 2>&1 >/dev/null)"; then
   echo "      ${RUNTIME_REF} ya existe: no se reconstruye (para cambiarlo, sube RUNTIME_TAG)."
 elif [[ "$inspect_err" == *"not found"* ]]; then
+  # The Alebrije patches to upstream's recipe, in name order. A patch that does not apply cleanly to this exact tag
+  # stops the build.
+  for p in "$CHART_DIR"/image/runtime-patches/*.patch; do
+    git -C "$WORK/pc" apply --check "$p"
+    git -C "$WORK/pc" apply "$p"
+    echo "      parche aplicado: ${p##*/}"
+  done
   # bake reads REGISTRY and VERSION from the environment (HCL variables).
   ( cd "$WORK/pc" && export REGISTRY && export VERSION="$RUNTIME_TAG" && \
       docker buildx bake -f docker/agent-runtime/buildx-bake.hcl --push \
@@ -80,12 +97,46 @@ fi
 RUNTIME_DIGEST="$(digest_of "$RUNTIME_REF")"
 echo "      ${RUNTIME_REF}@${RUNTIME_DIGEST}"
 
+echo "[2b/5] El runtime en cada plataforma: el shim de su arquitectura y Claude Code ${CLAUDE_CODE_VERSION}..."
+# Reads files of the pushed image itself; it never runs the agent binaries, because Claude Code (a Bun binary) aborts
+# under the emulation that runs the other architecture here ("qemu: uncaught target signal 6", measured 2026-10-13).
+# ELF e_machine at byte 18: 3e00 = x86-64, b700 = aarch64, for the shim and for Claude Code's real binary. It also
+# runs for a tag that already exists: a broken release is never reused.
+for par in linux/amd64:3e00 linux/arm64:b700; do
+  plat="${par%%:*}"; esperado="${par##*:}"
+  salida="$(docker run --rm --platform "$plat" --entrypoint /bin/sh "${RUNTIME_REF}@${RUNTIME_DIGEST}" -c '
+    for f in /usr/local/bin/paperclip-agent-shim "$(readlink -f "$(command -v claude)")"; do
+      od -A n -t x1 -j 18 -N 2 "$f" | tr -d " \n"; echo
+    done
+    sed -n "s/.*\"version\": *\"\([^\"]*\)\".*/\1/p" /usr/lib/node_modules/@anthropic-ai/claude-code/package.json | head -1')"
+  shim="$(sed -n 1p <<<"$salida")"
+  claude="$(sed -n 2p <<<"$salida")"
+  version="$(sed -n 3p <<<"$salida")"
+  [[ "$shim" == "$esperado" ]] \
+    || { echo "ERROR: en ${plat} el shim es de otra arquitectura (ELF ${shim}, se esperaba ${esperado})." >&2; exit 1; }
+  [[ "$claude" == "$esperado" ]] \
+    || { echo "ERROR: en ${plat} Claude Code es de otra arquitectura (ELF ${claude}, se esperaba ${esperado})." >&2; exit 1; }
+  [[ "$version" == "$CLAUDE_CODE_VERSION" ]] \
+    || { echo "ERROR: en ${plat} Claude Code es «${version}», se esperaba ${CLAUDE_CODE_VERSION}." >&2; exit 1; }
+  echo "      ${plat}: shim y Claude Code ${version}, los dos ELF ${shim}"
+done
+
 echo "[3/5] paperclip + proveedor kubernetes compilado (image/Dockerfile, linux/amd64+arm64, push)..."
 PAPERCLIP_REF="${REGISTRY}/paperclip:${PAPERCLIP_TAG}"
-docker buildx build --platform linux/amd64,linux/arm64 \
-  --cache-from "type=registry,ref=${REGISTRY}/paperclip:buildcache" \
-  --cache-to "type=registry,ref=${REGISTRY}/paperclip:buildcache,mode=max" \
-  --push -t "$PAPERCLIP_REF" "$CHART_DIR/image"
+# The same rule as the runtime: a tag is a release, built once. Rebuilding an existing PAPERCLIP_TAG would move it to
+# a new digest; a runtime-only release (2026.1005.0-2) ran this step and would have re-pushed k8s.4. To change the
+# server, raise PAPERCLIP_TAG. Only "not found" builds it; any other inspect error stops here.
+if inspect_err="$(docker buildx imagetools inspect "$PAPERCLIP_REF" 2>&1 >/dev/null)"; then
+  echo "      ${PAPERCLIP_REF} ya existe: no se reconstruye (para cambiarlo, sube PAPERCLIP_TAG)."
+elif [[ "$inspect_err" == *"not found"* ]]; then
+  docker buildx build --platform linux/amd64,linux/arm64 \
+    --cache-from "type=registry,ref=${REGISTRY}/paperclip:buildcache" \
+    --cache-to "type=registry,ref=${REGISTRY}/paperclip:buildcache,mode=max" \
+    --push -t "$PAPERCLIP_REF" "$CHART_DIR/image"
+else
+  echo "ERROR: no pude saber si ${PAPERCLIP_REF} existe: ${inspect_err}" >&2
+  exit 1
+fi
 PAPERCLIP_DIGEST="$(digest_of "$PAPERCLIP_REF")"
 echo "      ${PAPERCLIP_REF}@${PAPERCLIP_DIGEST}"
 

@@ -223,6 +223,38 @@ files, 180/180.
 - [ ] Patch suite green against the built image's dist/ and src/
 - [ ] Upstream auth and access suites green against the built image
 
+### 0.8 — Agent runtime image (`image/runtime-patches/`)
+
+`scripts/build-images.sh` applies every `image/runtime-patches/*.patch` to
+upstream's `docker/agent-runtime/` recipe (in name order, `git apply --check`
+first) before the bake. 0001 builds the shim for each platform (upstream's
+global `ARG TARGETARCH` put an x86-64 shim in the linux/arm64 image of
+2026.1005.0-1, and on a Raspberry Pi every agent run died at setup) and pins
+Claude Code instead of `@latest`. Step 2b of the script reads every platform of
+the pushed image without running its binaries (Claude Code, a Bun binary,
+aborts under emulation): the ELF machine of the shim and of Claude Code's real
+binary (`3e00` x86-64, `b700` aarch64) and the Claude Code version. It rejects
+2026.1005.0-1: "en linux/arm64 el shim es de otra arquitectura (ELF 3e00, se
+esperaba b700)".
+
+On an arm64 node, run the shim the way an agent run does (it reads the spec and
+execs the command), with a spec that only asks for `claude --version`. The pod
+uses the image by digest, the sandbox's registry secret, and
+`command: [/usr/bin/tini, --]`, `args: [sleep, "600"]`:
+
+```bash
+kubectl -n <sandbox namespace> exec <pod> -- /bin/bash -c '
+  printf "{\"command\":\"claude\",\"args\":[\"--version\"]}" > /tmp/spec.json
+  /usr/local/bin/paperclip-agent-shim --spec /tmp/spec.json --adapter claude_local'
+```
+
+**Expected:** `2.1.296 (Claude Code)`, rc=0. 2026.1005.0-1 gives rc=126,
+"cannot execute binary file: Exec format error" (both measured 2026-10-13 on a
+Raspberry Pi 4).
+
+- [ ] Step 2b green: each platform with its own ELF and the pinned Claude Code
+- [ ] On an arm64 node, the shim execs `claude --version`
+
 ---
 
 ## Phase 1 — Deployment to Docker Desktop K8s
