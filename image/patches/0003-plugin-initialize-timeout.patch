@@ -1,0 +1,290 @@
+diff --git a/server/src/__tests__/fixtures/plugin-worker-slow-initialize.cjs b/server/src/__tests__/fixtures/plugin-worker-slow-initialize.cjs
+new file mode 100644
+index 0000000..554e045
+--- /dev/null
++++ b/server/src/__tests__/fixtures/plugin-worker-slow-initialize.cjs
+@@ -0,0 +1,53 @@
++const readline = require("node:readline");
++
++// Answers initialize after SLOW_INITIALIZE_DELAY_MS, like a worker whose module
++// imports take that long on a slow host.
++const initializeDelayMs = Number(process.env.SLOW_INITIALIZE_DELAY_MS ?? 0);
++
++function send(message) {
++  process.stdout.write(`${JSON.stringify(message)}\n`);
++}
++
++const rl = readline.createInterface({
++  input: process.stdin,
++  crlfDelay: Infinity,
++});
++
++rl.on("line", (line) => {
++  if (!line.trim()) return;
++  const message = JSON.parse(line);
++  const method = message && typeof message.method === "string" ? message.method : null;
++
++  if (method === "initialize") {
++    setTimeout(() => {
++      send({
++        jsonrpc: "2.0",
++        id: message.id,
++        result: {
++          ok: true,
++          supportedMethods: [],
++        },
++      });
++    }, initializeDelayMs);
++    return;
++  }
++
++  if (method === "shutdown") {
++    send({
++      jsonrpc: "2.0",
++      id: message.id,
++      result: {},
++    });
++    setImmediate(() => process.exit(0));
++    return;
++  }
++
++  send({
++    jsonrpc: "2.0",
++    id: message.id,
++    error: {
++      code: -32601,
++      message: `Unhandled method: ${method}`,
++    },
++  });
++});
+diff --git a/server/src/__tests__/plugin-initialize-timeout.test.ts b/server/src/__tests__/plugin-initialize-timeout.test.ts
+new file mode 100644
+index 0000000..58b3497
+--- /dev/null
++++ b/server/src/__tests__/plugin-initialize-timeout.test.ts
+@@ -0,0 +1,137 @@
++import path from "node:path";
++import { fileURLToPath } from "node:url";
++import { afterEach, describe, expect, it, vi } from "vitest";
++import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
++
++// Mock the shared logger, as plugin-worker-manager.test.ts does: a failed
++// initialize logs an error, and it does not belong in the test output.
++vi.mock("../middleware/logger.js", () => {
++  const mockLogger: Record<string, unknown> = {
++    trace: vi.fn(),
++    debug: vi.fn(),
++    info: vi.fn(),
++    warn: vi.fn(),
++    error: vi.fn(),
++    fatal: vi.fn(),
++    child: vi.fn(() => mockLogger),
++  };
++  return { logger: mockLogger, httpLogger: vi.fn() };
++});
++
++import {
++  createPluginWorkerHandle,
++  resolvePluginInitializeTimeoutMs,
++} from "../services/plugin-worker-manager.js";
++
++const FIXTURES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
++const SLOW_INITIALIZE_WORKER_ENTRYPOINT = path.join(
++  FIXTURES_DIR,
++  "plugin-worker-slow-initialize.cjs",
++);
++
++const TEST_MANIFEST: PaperclipPluginManifestV1 = {
++  id: "test.plugin",
++  apiVersion: 1,
++  version: "1.0.0",
++  displayName: "Test plugin",
++  description: "Test plugin",
++  author: "Paperclip",
++  categories: ["automation"],
++  capabilities: [],
++  entrypoints: { worker: "dist/worker.js" },
++};
++
++function makeSlowInitializeHandle(initializeDelayMs: number, extra?: Record<string, unknown>) {
++  return createPluginWorkerHandle("test.plugin", {
++    entrypointPath: SLOW_INITIALIZE_WORKER_ENTRYPOINT,
++    manifest: TEST_MANIFEST,
++    config: {},
++    instanceInfo: {
++      instanceId: "instance-1",
++      hostVersion: "1.0.0",
++    },
++    apiVersion: 1,
++    hostHandlers: {},
++    autoRestart: false,
++    env: { SLOW_INITIALIZE_DELAY_MS: String(initializeDelayMs) },
++    ...extra,
++  });
++}
++
++afterEach(() => {
++  vi.unstubAllEnvs();
++});
++
++describe("resolvePluginInitializeTimeoutMs", () => {
++  it("uses 15 seconds when PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS is unset or blank", () => {
++    expect(resolvePluginInitializeTimeoutMs({})).toBe(15_000);
++    expect(resolvePluginInitializeTimeoutMs({ PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS: "" })).toBe(15_000);
++    expect(resolvePluginInitializeTimeoutMs({ PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS: "   " })).toBe(15_000);
++  });
++
++  it("reads a whole number of milliseconds between 1 second and 10 minutes", () => {
++    expect(resolvePluginInitializeTimeoutMs({ PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS: "60000" })).toBe(60_000);
++    expect(resolvePluginInitializeTimeoutMs({ PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS: " 60000 " })).toBe(60_000);
++    expect(resolvePluginInitializeTimeoutMs({ PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS: "1000" })).toBe(1_000);
++    expect(resolvePluginInitializeTimeoutMs({ PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS: "600000" })).toBe(600_000);
++  });
++
++  it.each(["60s", "1e4", "-5000", "12.5", "0x3e8", "999", "600001", "abc", "99999999999999999999"])(
++    "rejects %j instead of falling back to 15 seconds",
++    (raw) => {
++      expect(() =>
++        resolvePluginInitializeTimeoutMs({ PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS: raw }),
++      ).toThrow(
++        /PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS must be a whole number of milliseconds between 1000 and 600000/,
++      );
++    },
++  );
++
++  it("reads process.env by default", () => {
++    vi.stubEnv("PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS", "45000");
++    expect(resolvePluginInitializeTimeoutMs()).toBe(45_000);
++  });
++});
++
++describe("worker initialize timeout", () => {
++  it("fails the start when initialize outlasts initializeTimeoutMs", async () => {
++    const handle = makeSlowInitializeHandle(2_000, { initializeTimeoutMs: 50 });
++    try {
++      await expect(handle.start()).rejects.toThrow('RPC call "initialize" timed out after 50ms');
++      expect(handle.status).toBe("crashed");
++    } finally {
++      await handle.stop();
++    }
++  });
++
++  it("waits for a slow initialize that fits in initializeTimeoutMs", async () => {
++    const handle = makeSlowInitializeHandle(300, { initializeTimeoutMs: 5_000 });
++    try {
++      await handle.start();
++      expect(handle.status).toBe("running");
++    } finally {
++      await handle.stop();
++    }
++  });
++
++  it("takes the timeout from PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS when the handle sets none", async () => {
++    vi.stubEnv("PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS", "1000");
++    const handle = makeSlowInitializeHandle(5_000);
++    try {
++      await expect(handle.start()).rejects.toThrow('RPC call "initialize" timed out after 1000ms');
++    } finally {
++      await handle.stop();
++    }
++  });
++
++  it("does not spawn a worker when PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS is invalid", async () => {
++    vi.stubEnv("PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS", "15s");
++    const handle = makeSlowInitializeHandle(0);
++    try {
++      await expect(handle.start()).rejects.toThrow(/PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS must be/);
++      expect(handle.status).toBe("stopped");
++    } finally {
++      await handle.stop();
++    }
++  });
++});
+diff --git a/server/src/services/plugin-worker-manager.ts b/server/src/services/plugin-worker-manager.ts
+index af6721f..9fbc16b 100644
+--- a/server/src/services/plugin-worker-manager.ts
++++ b/server/src/services/plugin-worker-manager.ts
+@@ -91,8 +91,12 @@ const MAX_RPC_TIMEOUT_MS = 15 * 60 * 1_000;
+  */
+ const MAX_NODE_TIMER_TIMEOUT_MS = 2_147_483_647;
+ 
+-/** Timeout for the initialize RPC call. */
+-const INITIALIZE_TIMEOUT_MS = 15_000;
++/** Default timeout for the initialize RPC call. */
++const DEFAULT_INITIALIZE_TIMEOUT_MS = 15_000;
++
++/** Accepted range for PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS: 1 second to 10 minutes. */
++const MIN_INITIALIZE_TIMEOUT_MS = 1_000;
++const MAX_INITIALIZE_TIMEOUT_MS = 10 * 60 * 1_000;
+ 
+ /** Timeout for the shutdown RPC call before escalating to SIGTERM. */
+ const SHUTDOWN_DRAIN_MS = 10_000;
+@@ -387,6 +391,34 @@ export function resolveRpcCallTimeoutMs(
+   return Math.min(defaultTimeoutMs, MAX_RPC_TIMEOUT_MS);
+ }
+ 
++/**
++ * Resolve the default timeout for the initialize RPC call.
++ *
++ * 15 seconds, unless PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS sets another whole
++ * number of milliseconds between 1 second and 10 minutes. Slow hosts need more:
++ * on a Raspberry Pi 4 the kubernetes sandbox provider worker spends about 10
++ * seconds of CPU importing its modules through tsx, and at boot it competes
++ * with the server for the CPU. An invalid value throws instead of falling back
++ * to 15 seconds, so a typo is not silently ignored.
++ */
++export function resolvePluginInitializeTimeoutMs(
++  env: NodeJS.ProcessEnv = process.env,
++): number {
++  const raw = env.PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS?.trim();
++  if (!raw) return DEFAULT_INITIALIZE_TIMEOUT_MS;
++  const value = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
++  if (
++    !Number.isSafeInteger(value) ||
++    value < MIN_INITIALIZE_TIMEOUT_MS ||
++    value > MAX_INITIALIZE_TIMEOUT_MS
++  ) {
++    throw new Error(
++      `PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS must be a whole number of milliseconds between ${MIN_INITIALIZE_TIMEOUT_MS} and ${MAX_INITIALIZE_TIMEOUT_MS}, got "${raw}"`,
++    );
++  }
++  return value;
++}
++
+ /**
+  * Options for starting a worker process.
+  */
+@@ -422,6 +454,11 @@ export interface WorkerStartOptions {
+   hostHandlers: WorkerToHostHandlers;
+   /** Default timeout for RPC calls (ms). Defaults to 30s. */
+   rpcTimeoutMs?: number;
++  /**
++   * Timeout for the initialize RPC call (ms). Defaults to
++   * resolvePluginInitializeTimeoutMs(): PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS, or 15s.
++   */
++  initializeTimeoutMs?: number;
+   /** Whether to auto-restart on crash. Defaults to true. */
+   autoRestart?: boolean;
+   /** Node.js execArgv passed to the child process. */
+@@ -3100,6 +3137,12 @@ export function createPluginWorkerHandle(
+       throw new Error(`Worker for plugin "${pluginId}" is already ${status}`);
+     }
+ 
++    // Resolved before anything changes: an invalid
++    // PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS fails the start without spawning
++    // a worker.
++    const initializeTimeoutMs =
++      options.initializeTimeoutMs ?? resolvePluginInitializeTimeoutMs();
++
+     intentionalStop = false;
+     setStatus("starting");
+     stderrExcerpt = "";
+@@ -3122,7 +3165,7 @@ export function createPluginWorkerHandle(
+       const result = await callInternal(
+         "initialize",
+         initParams,
+-        INITIALIZE_TIMEOUT_MS,
++        initializeTimeoutMs,
+       ) as { ok?: boolean; supportedMethods?: string[] } | undefined;
+       if (!result || !result.ok) {
+         throw new Error("Worker initialize returned ok=false");

@@ -38,8 +38,9 @@ UPSTREAM_REPO="https://github.com/paperclipai/paperclip.git"
 UPSTREAM_TAG="v2026.1005.0"
 UPSTREAM_COMMIT="467125f"          # measured 2026-10-08 (git log -1 of the tag)
 REGISTRY="docker.io/ileonelperea"
-# k8s.5: image/patches/0002, the job backend execs into an idle pod (in k8s.4 no agent run got past the Git probe).
-PAPERCLIP_TAG="${PAPERCLIP_TAG:-2026.1005.0-k8s.5}"
+# k8s.6: image/patches/0003, the plugin initialize timeout from PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS (on a Raspberry Pi
+# the kubernetes provider worker initialized in 11.9-13s against the fixed 15s). k8s.5 brought 0002 (the job backend).
+PAPERCLIP_TAG="${PAPERCLIP_TAG:-2026.1005.0-k8s.6}"
 # 2026.1005.0-1 has the x86-64 shim in its arm64 image (step 2b rejects it); -2 is built with runtime-patches/0001.
 RUNTIME_TAG="${RUNTIME_TAG:-2026.1005.0-2}"
 # The Claude Code that image/runtime-patches/0001 installs (the reviewed one: what -1 shipped). Step 2b checks it.

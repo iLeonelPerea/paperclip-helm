@@ -116,11 +116,45 @@ RUN set -eu; \
       echo "provider unit tests: run on ${BUILDPLATFORM}, not under emulation for ${TARGETPLATFORM}"; \
     fi
 
+# The server's Alebrije patches with their unit tests (vitest and supertest are
+# already in the image), run once on the build's own platform, like the
+# provider's. Nothing of this stage ships: the final stage takes only its marker
+# file, so BuildKit has to run it, and applies the same patches again to compile
+# them into dist/.
+#   - 0003-plugin-initialize-timeout.patch: the plugin worker's initialize RPC
+#     takes its timeout from PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS (15s without
+#     it, as upstream). On a Raspberry Pi 4 the kubernetes provider's worker
+#     spends ~10s of CPU just importing its modules through tsx (measured
+#     2026-10-14) and initialized in 11.9-13s against upstream's fixed 15s; past
+#     it the plugin stays in error and every agent run fails. Upstream's suite
+#     for the same module (plugin-worker-manager.test.ts) runs too, against the
+#     patched module.
+FROM ${PAPERCLIP_IMAGE} AS server-patch-tests
+ARG BUILDPLATFORM
+ARG TARGETPLATFORM
+COPY patches/ /tmp/alebrije-patches/
+WORKDIR /app
+RUN set -eu; \
+    for p in /tmp/alebrije-patches/*.patch; do \
+      git apply --check "$p"; \
+      git apply "$p"; \
+    done; \
+    if [ "$TARGETPLATFORM" = "$BUILDPLATFORM" ]; then \
+      cd /app/server; \
+      NODE_ENV=development pnpm exec vitest run \
+        src/__tests__/plugin-initialize-timeout.test.ts \
+        src/__tests__/plugin-worker-manager.test.ts; \
+    else \
+      echo "server patch tests: run on ${BUILDPLATFORM}, not under emulation for ${TARGETPLATFORM}"; \
+    fi; \
+    echo "$TARGETPLATFORM" > /alebrije-server-patch-tests.done
+
 FROM ${PAPERCLIP_IMAGE}
 ARG PROVIDER_DIR
 ARG PAPERCLIP_RELEASE
 ARG ESBUILD_VERSIONS
 ARG PROXY_ADDR_INTEGRITY
+ARG TARGETPLATFORM
 COPY --from=kubernetes-provider ${PROVIDER_DIR}/dist ${PROVIDER_DIR}/dist
 WORKDIR ${PROVIDER_DIR}
 # Runtime dependencies only (@kubernetes/client-node, zod) + the same SDK link.
@@ -188,8 +222,15 @@ RUN set -eu; \
 #   - 0002-kubernetes-job-backend-exec.patch: compiled with the provider in the
 #     kubernetes-provider stage (see there), where its unit tests run; here it
 #     only brings the shipped provider src/ and test/ in line with that dist/.
+#   - 0003-plugin-initialize-timeout.patch: services/plugin-worker-manager,
+#     compiled into dist/ here; its tests ran in the server-patch-tests stage,
+#     whose marker must name this platform.
+COPY --from=server-patch-tests /alebrije-server-patch-tests.done /tmp/alebrije-server-patch-tests.done
 COPY patches/ /tmp/alebrije-patches/
 RUN set -eu; \
+    [ "$(cat /tmp/alebrije-server-patch-tests.done)" = "$TARGETPLATFORM" ] \
+      || { echo "ERROR: the server-patch-tests stage did not run for ${TARGETPLATFORM}" >&2; exit 1; }; \
+    rm /tmp/alebrije-server-patch-tests.done; \
     cd /app; \
     applied=0; : > /tmp/alebrije-patched-files; \
     for p in /tmp/alebrije-patches/*.patch; do \
@@ -217,6 +258,8 @@ RUN set -eu; \
       || { echo "ERROR: dist/routes/access.js has no POST /admin/users" >&2; exit 1; }; \
     grep -q 'registerAdminUserCreator(' dist/auth/better-auth.js \
       || { echo "ERROR: dist/auth/better-auth.js does not register the user creator" >&2; exit 1; }; \
+    grep -q 'options.initializeTimeoutMs ?? resolvePluginInitializeTimeoutMs()' dist/services/plugin-worker-manager.js \
+      || { echo "ERROR: dist/services/plugin-worker-manager.js keeps the fixed initialize timeout (patch 0003)" >&2; exit 1; }; \
     grep -q '"sleep infinity"' "${PROVIDER_DIR}/dist/pod-spec-builder.js" \
       || { echo "ERROR: the provider dist/ does not idle the job pod (patch 0002)" >&2; exit 1; }; \
     grep -q 'waitForJobPodRunning(' "${PROVIDER_DIR}/dist/plugin.js" \
@@ -228,6 +271,14 @@ RUN set -eu; \
         .then(([c, b, a]) => { const ok = typeof c.createUserWithPassword === 'function' && typeof c.registerAdminUserCreator === 'function' && typeof b.createBetterAuthInstance === 'function' && typeof a.accessRoutes === 'function'; \
           if (!ok) { console.error('ERROR: a patched dist module lost an export'); process.exit(1); } console.log('patched dist modules load'); process.exit(0); }, \
           (e) => { console.error('ERROR: a patched dist module does not load:', e); process.exit(1); })"; \
+    node --import ./server/node_modules/tsx/dist/loader.mjs -e " \
+      import('/app/server/dist/services/plugin-worker-manager.js').then((m) => { \
+          const r = m.resolvePluginInitializeTimeoutMs; \
+          if (typeof r !== 'function' || r({}) !== 15000 || r({ PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS: '60000' }) !== 60000) { console.error('ERROR: dist plugin-worker-manager does not resolve the initialize timeout (patch 0003)'); process.exit(1); } \
+          let rejected = false; try { r({ PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS: '15s' }); } catch (e) { rejected = /must be a whole number/.test(String(e)); } \
+          if (!rejected) { console.error('ERROR: dist plugin-worker-manager accepts an invalid initialize timeout (patch 0003)'); process.exit(1); } \
+          console.log('patched plugin worker manager loads: initialize timeout 15000 by default, 60000 from the variable'); process.exit(0); }, \
+        (e) => { console.error('ERROR: dist plugin-worker-manager does not load:', e); process.exit(1); })"; \
     rm -rf /tmp/alebrije-patches
 LABEL io.alebrije.paperclip.base="ghcr.io/paperclipai/paperclip:2026.1005.0" \
-      io.alebrije.paperclip.extra="kubernetes sandbox provider compiled in place (ADR-158 §0-ter.5); esbuild rebuilt with Go 1.26.9, proxy-addr 2.0.8, release version in place of the 0.3.1 placeholder; patch 0001 POST /api/admin/users (ADR-115 D6, d6-5), compiled into dist; patch 0002 job backend execs into an idle pod, compiled into the provider dist"
+      io.alebrije.paperclip.extra="kubernetes sandbox provider compiled in place (ADR-158 §0-ter.5); esbuild rebuilt with Go 1.26.9, proxy-addr 2.0.8, release version in place of the 0.3.1 placeholder; patch 0001 POST /api/admin/users (ADR-115 D6, d6-5), compiled into dist; patch 0002 job backend execs into an idle pod, compiled into the provider dist; patch 0003 plugin initialize timeout from PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS, compiled into dist"

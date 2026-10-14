@@ -249,6 +249,38 @@ stays Running and the run's commands execute inside it.
 - [ ] Provider unit tests green in the build, with patch 0002 applied
 - [ ] An agent run on the `job` backend gets past the Git probe
 
+**Patches to the server with unit tests** run them in the `server-patch-tests`
+stage: it applies every patch to a copy of the base image and runs the listed
+vitest suites on the build's own platform. Nothing of that stage ships; the
+final stage takes only its marker, checks that it names the platform being
+built, and compiles the patches into dist/ as above.
+
+Patch 0003 (`0003-plugin-initialize-timeout.patch`): the plugin worker's
+`initialize` RPC takes its timeout from `PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS`
+(a whole number of milliseconds, 1000 to 600000), and 15000 without it, as
+upstream. An invalid value fails the plugin's start, instead of falling back to 15 s,
+and no worker is spawned. On a Raspberry Pi 4 the kubernetes provider's worker
+initialized in 11.9 to 13 s, against upstream's fixed 15 s (2026-10-13 and 14, on
+pi-k3s): it spends about 10 s of CPU importing its modules through tsx
+(`@paperclipai/shared` about 4 s even compiled, `@kubernetes/client-node` 2.3 s,
+tsx 2 to 3 s more), and at boot it competes with the server. Past 15 s the plugin
+stays in `error` and every agent run fails with `configuration_incomplete`.
+
+**Expected** in the build log of `server-patch-tests` (linux/arm64 on an M-series
+Mac, measured 2026-10-14): `plugin-initialize-timeout.test.ts` 16/16 and upstream's
+`plugin-worker-manager.test.ts` 83/83, 99/99 in all. Control: the same tests
+without the change to `plugin-worker-manager.ts` fail 15 of 16 (only the
+slow-but-in-time start passes either way) and the build stops. In the final stage:
+`compiled into dist: services/plugin-worker-manager` and `patched plugin worker
+manager loads: initialize timeout 15000 by default, 60000 from the variable`.
+
+On a cluster with `PAPERCLIP_PLUGIN_INITIALIZE_TIMEOUT_MS` set, the provider's
+worker logs «worker process started and initialized» at every boot, however long
+it takes within that budget.
+
+- [ ] Server patch tests green in the build, with patch 0003 applied
+- [ ] The provider plugin initializes at boot with the variable set
+
 ### 0.8 — Agent runtime image (`image/runtime-patches/`)
 
 `scripts/build-images.sh` applies every `image/runtime-patches/*.patch` to
