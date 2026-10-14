@@ -223,6 +223,32 @@ files, 180/180.
 - [ ] Patch suite green against the built image's dist/ and src/
 - [ ] Upstream auth and access suites green against the built image
 
+**Patches to the kubernetes sandbox provider** (patch files whose paths are all
+under `packages/plugins/sandbox-providers/kubernetes/`) are applied in the
+`kubernetes-provider` stage, before the provider is compiled, and that stage runs
+the provider's unit tests (`vitest run`) on the build's own platform: the build
+stops if one fails. The final stage applies the patches again so the shipped src/
+matches the compiled dist/, and checks dist/ for them.
+
+Patch 0002 (`0002-kubernetes-job-backend-exec.patch`): on the `job` backend the
+Job's pod idles (`sleep infinity`) and paperclip-server execs every command into
+it, as on `sandbox-cr`. Upstream ignored the command there and waited for a
+one-shot shim with no spec, so no agent run got past the server's per-run Git
+probe («Could not read execution-target Git context», 2026-10-13).
+
+**Expected** in the build log of `kubernetes-provider`: `applied to the provider:
+0002-kubernetes-job-backend-exec.patch`, then 21 test files and 213/213, with
+`plugin-job-execute.test.ts` (6), `job-orchestrator.test.ts` (15, 6 of them for
+`waitForJobPodRunning`) and `pod-spec-builder.test.ts` (11). Control: the same
+tests against the unpatched provider fail 13 of 213 (every new or changed test)
+and the build stops (measured 2026-10-13).
+
+On a cluster, an agent run on the `job` backend gets past setup: its Job pod
+stays Running and the run's commands execute inside it.
+
+- [ ] Provider unit tests green in the build, with patch 0002 applied
+- [ ] An agent run on the `job` backend gets past the Git probe
+
 ### 0.8 — Agent runtime image (`image/runtime-patches/`)
 
 `scripts/build-images.sh` applies every `image/runtime-patches/*.patch` to

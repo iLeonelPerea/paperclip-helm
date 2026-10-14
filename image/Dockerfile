@@ -70,14 +70,51 @@ RUN set -eu; mkdir -p /out; \
 
 FROM ${PAPERCLIP_IMAGE} AS kubernetes-provider
 ARG PROVIDER_DIR
+ARG BUILDPLATFORM
+ARG TARGETPLATFORM
+# The provider's own Alebrije patches (image/patches/*.patch whose files are ALL
+# under the provider's directory) go in here, BEFORE it is compiled: the server
+# runs this dist/. The final stage applies every patch again to /app, so the
+# shipped src/ matches this dist/. A patch that mixes provider files with others
+# stops the build instead of leaving dist/ and src/ out of step.
+#   - 0002-kubernetes-job-backend-exec.patch: the job backend's pod idles (sleep
+#     infinity, like the sandbox-cr pod) and paperclip-server execs every command
+#     into it. Upstream's job backend ignored the command and only waited for a
+#     one-shot shim that has no spec (/run/paperclip/runtime-command.json is never
+#     mounted, the shim exits 2), so no agent run got past the server's per-run Git
+#     probe: «Could not read execution-target Git context» (measured 2026-10-13 on
+#     pi-k3s; the same code in v2026.1012.0).
+COPY patches/ /tmp/alebrije-patches/
+WORKDIR /app
+RUN set -eu; \
+    rel="${PROVIDER_DIR#/app/}/"; \
+    for p in /tmp/alebrije-patches/*.patch; do \
+      files="$(git apply --numstat "$p" | awk '{print $3}')"; \
+      total="$(printf '%s\n' "$files" | awk 'NF {n++} END {print n + 0}')"; \
+      inside="$(printf '%s\n' "$files" | awk -v r="$rel" 'index($0, r) == 1 {n++} END {print n + 0}')"; \
+      [ "$inside" -gt 0 ] || continue; \
+      [ "$inside" -eq "$total" ] || { echo "ERROR: $(basename "$p") mixes provider files with others" >&2; exit 1; }; \
+      git apply --check "$p"; \
+      git apply "$p"; \
+      echo "applied to the provider: $(basename "$p")"; \
+    done; \
+    rm -rf /tmp/alebrije-patches
 WORKDIR ${PROVIDER_DIR}
 # NODE_ENV=production in the image would make pnpm skip typescript (a devDependency).
+# The provider's unit tests (vitest, a devDependency too) run against the patched
+# source once, on the build's own platform: they are platform-independent
+# TypeScript, and the other platform builds under emulation.
 RUN set -eu; \
     NODE_ENV=development pnpm install --ignore-workspace --no-lockfile; \
     mkdir -p node_modules/@paperclipai; \
     ln -sfn /app/packages/plugins/sdk node_modules/@paperclipai/plugin-sdk; \
     pnpm exec tsc -p tsconfig.json; \
-    test -f dist/manifest.js || { echo "ERROR: kubernetes provider is missing dist/manifest.js after build" >&2; exit 1; }
+    test -f dist/manifest.js || { echo "ERROR: kubernetes provider is missing dist/manifest.js after build" >&2; exit 1; }; \
+    if [ "$TARGETPLATFORM" = "$BUILDPLATFORM" ]; then \
+      NODE_ENV=development pnpm exec vitest run; \
+    else \
+      echo "provider unit tests: run on ${BUILDPLATFORM}, not under emulation for ${TARGETPLATFORM}"; \
+    fi
 
 FROM ${PAPERCLIP_IMAGE}
 ARG PROVIDER_DIR
@@ -148,6 +185,9 @@ RUN set -eu; \
 #     stays closed (PAPERCLIP_AUTH_DISABLE_SIGN_UP=true). Its suite
 #     server/src/__tests__/admin-user-create.integration.test.ts runs against
 #     src/ or, with PAPERCLIP_TEST_BUILD=dist, against this dist/.
+#   - 0002-kubernetes-job-backend-exec.patch: compiled with the provider in the
+#     kubernetes-provider stage (see there), where its unit tests run; here it
+#     only brings the shipped provider src/ and test/ in line with that dist/.
 COPY patches/ /tmp/alebrije-patches/
 RUN set -eu; \
     cd /app; \
@@ -177,6 +217,11 @@ RUN set -eu; \
       || { echo "ERROR: dist/routes/access.js has no POST /admin/users" >&2; exit 1; }; \
     grep -q 'registerAdminUserCreator(' dist/auth/better-auth.js \
       || { echo "ERROR: dist/auth/better-auth.js does not register the user creator" >&2; exit 1; }; \
+    grep -q '"sleep infinity"' "${PROVIDER_DIR}/dist/pod-spec-builder.js" \
+      || { echo "ERROR: the provider dist/ does not idle the job pod (patch 0002)" >&2; exit 1; }; \
+    grep -q 'waitForJobPodRunning(' "${PROVIDER_DIR}/dist/plugin.js" \
+      || { echo "ERROR: the provider dist/ does not exec on the job backend (patch 0002)" >&2; exit 1; }; \
+    node -e "import('${PROVIDER_DIR}/dist/job-orchestrator.js').then((m) => { if (typeof m.waitForJobPodRunning !== 'function') { console.error('ERROR: the provider dist/ lost waitForJobPodRunning'); process.exit(1); } console.log('patched provider module loads'); }, (e) => { console.error('ERROR: the patched provider module does not load:', e); process.exit(1); })"; \
     cd /app; \
     node --import ./server/node_modules/tsx/dist/loader.mjs -e " \
       Promise.all([import('/app/server/dist/auth/admin-user-creator.js'), import('/app/server/dist/auth/better-auth.js'), import('/app/server/dist/routes/access.js')]) \
@@ -185,4 +230,4 @@ RUN set -eu; \
           (e) => { console.error('ERROR: a patched dist module does not load:', e); process.exit(1); })"; \
     rm -rf /tmp/alebrije-patches
 LABEL io.alebrije.paperclip.base="ghcr.io/paperclipai/paperclip:2026.1005.0" \
-      io.alebrije.paperclip.extra="kubernetes sandbox provider compiled in place (ADR-158 §0-ter.5); esbuild rebuilt with Go 1.26.9, proxy-addr 2.0.8, release version in place of the 0.3.1 placeholder; patch 0001 POST /api/admin/users (ADR-115 D6, d6-5), compiled into dist"
+      io.alebrije.paperclip.extra="kubernetes sandbox provider compiled in place (ADR-158 §0-ter.5); esbuild rebuilt with Go 1.26.9, proxy-addr 2.0.8, release version in place of the 0.3.1 placeholder; patch 0001 POST /api/admin/users (ADR-115 D6, d6-5), compiled into dist; patch 0002 job backend execs into an idle pod, compiled into the provider dist"

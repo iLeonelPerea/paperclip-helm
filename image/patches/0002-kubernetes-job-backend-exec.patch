@@ -1,0 +1,696 @@
+diff --git a/packages/plugins/sandbox-providers/kubernetes/src/job-orchestrator.ts b/packages/plugins/sandbox-providers/kubernetes/src/job-orchestrator.ts
+index 4260ed0..6367e98 100644
+--- a/packages/plugins/sandbox-providers/kubernetes/src/job-orchestrator.ts
++++ b/packages/plugins/sandbox-providers/kubernetes/src/job-orchestrator.ts
+@@ -90,6 +90,80 @@ export async function deleteJob(
+   });
+ }
+ 
++export class JobPodTimeoutError extends Error {
++  constructor(namespace: string, name: string, timeoutMs: number, lastState: string) {
++    super(`The pod of Job ${namespace}/${name} was not Running within ${timeoutMs}ms (last seen: ${lastState})`);
++    this.name = "JobPodTimeoutError";
++  }
++}
++
++type JobPodView = {
++  metadata?: { name?: string; deletionTimestamp?: unknown };
++  status?: {
++    phase?: string;
++    containerStatuses?: {
++      name?: string;
++      state?: {
++        running?: unknown;
++        waiting?: { reason?: string };
++        terminated?: { exitCode?: number; reason?: string };
++      };
++    }[];
++  };
++};
++
++/**
++ * Alebrije patch 0002: the job backend idles its pod (`sleep infinity`, see
++ * pod-spec-builder) and paperclip-server execs every command into it, as with
++ * sandbox-cr. Waits until the Job's pod is Running with its `agent` container
++ * started, and returns the pod name. A finished Job or a terminated pod can
++ * never take an exec, so those fail at once instead of waiting out the timeout;
++ * a pod still waiting (image pull, the per-run Secret not created yet) is
++ * polled until the deadline.
++ */
++export async function waitForJobPodRunning(
++  clients: KubeClients,
++  namespace: string,
++  jobName: string,
++  opts: { timeoutMs: number; pollMs?: number },
++): Promise<string> {
++  const deadline = Date.now() + opts.timeoutMs;
++  const pollMs = opts.pollMs ?? 2000;
++  let lastState = "no pod yet";
++  for (;;) {
++    const job = await getJobStatus(clients, namespace, jobName);
++    if (job.phase === "Failed" || job.phase === "Succeeded") {
++      throw new Error(
++        `Job ${namespace}/${jobName} is ${job.phase}${job.reason ? ` (${job.reason})` : ""}: its pod cannot take an exec`,
++      );
++    }
++    const result = await clients.core.listNamespacedPod({
++      namespace,
++      labelSelector: `job-name=${jobName}`,
++    });
++    const pods = ((result as { items?: JobPodView[] }).items) ?? [];
++    for (const pod of pods) {
++      if (pod.metadata?.deletionTimestamp) continue;
++      const agent = pod.status?.containerStatuses?.find((c) => c.name === "agent");
++      const terminated = agent?.state?.terminated;
++      if (pod.status?.phase === "Failed" || pod.status?.phase === "Succeeded" || terminated) {
++        throw new Error(
++          `Pod ${namespace}/${pod.metadata?.name} of Job ${jobName} terminated` +
++            (terminated ? ` (exit ${terminated.exitCode ?? "?"}${terminated.reason ? `, ${terminated.reason}` : ""})` : "") +
++            ": it cannot take an exec",
++        );
++      }
++      if (pod.status?.phase === "Running" && agent?.state?.running && pod.metadata?.name) {
++        return pod.metadata.name;
++      }
++      lastState = `${pod.status?.phase ?? "unknown phase"}${agent?.state?.waiting?.reason ? `: ${agent.state.waiting.reason}` : ""}`;
++    }
++    const remaining = deadline - Date.now();
++    if (remaining <= 0) throw new JobPodTimeoutError(namespace, jobName, opts.timeoutMs, lastState);
++    await sleep(Math.min(pollMs, remaining));
++  }
++}
++
+ export async function waitForJobCompletion(
+   clients: KubeClients,
+   namespace: string,
+diff --git a/packages/plugins/sandbox-providers/kubernetes/src/lease-lifecycle.ts b/packages/plugins/sandbox-providers/kubernetes/src/lease-lifecycle.ts
+index 87e18ae..0b008b7 100644
+--- a/packages/plugins/sandbox-providers/kubernetes/src/lease-lifecycle.ts
++++ b/packages/plugins/sandbox-providers/kubernetes/src/lease-lifecycle.ts
+@@ -139,8 +139,8 @@ export async function checkLeaseResumable(
+     // Terminal Jobs cannot be re-run in place.
+     return { resumable: false, reason: `Job is ${status.phase}` };
+   }
+-  // Pending/Running Jobs are resumable: execute() waits for completion
+-  // itself, so a not-yet-scheduled pod (podName null) is fine here.
++  // Pending/Running Jobs are resumable: execute() waits for the pod to run
++  // itself (Alebrije patch 0002), so a not-yet-scheduled pod (podName null) is fine here.
+   const podName = await findPodForJob(clients, input.namespace, input.name);
+   return {
+     resumable: true,
+diff --git a/packages/plugins/sandbox-providers/kubernetes/src/plugin.ts b/packages/plugins/sandbox-providers/kubernetes/src/plugin.ts
+index 8ae47de..4d11447 100644
+--- a/packages/plugins/sandbox-providers/kubernetes/src/plugin.ts
++++ b/packages/plugins/sandbox-providers/kubernetes/src/plugin.ts
+@@ -31,7 +31,7 @@ import { buildSandboxCrManifest } from "./sandbox-cr-builder.js";
+ import { ensureTenant } from "./tenant-orchestrator.js";
+ import { createPerRunSecret } from "./secret-manager.js";
+ import { FastUploadInterceptor } from "./upload-interceptor.js";
+-import { jobOrchestrator, JobTimeoutError } from "./job-orchestrator.js";
++import { jobOrchestrator, JobPodTimeoutError, waitForJobPodRunning } from "./job-orchestrator.js";
+ import {
+   sandboxCrOrchestrator,
+   SandboxCrTimeoutError,
+@@ -693,11 +693,15 @@ const plugin = definePlugin({
+         ? timeoutMs
+         : config.podActivityDeadlineSec * 1000;
+ 
+-    if (leaseBackend === "sandbox-cr") {
+-      // ── Sandbox-CR backend ──────────────────────────────────────────────────
+-      // 1. Ensure the Sandbox pod is Ready (wait only on first exec for this lease).
++    if (leaseBackend === "sandbox-cr" || leaseBackend === "job") {
++      // ── Sandbox-CR and Job backends ─────────────────────────────────────────
++      // 1. Ensure the pod is Ready (wait only on first exec for this lease).
+       // 2. Exec the command into the running pod.
+       // 3. Return exec result directly (no log scraping needed).
++      // Alebrije patch 0002: the Job backend used to ignore command/args/stdin and
++      // wait for its one-shot entrypoint; every run then died at the server's Git
++      // probe. Its pod now idles like the Sandbox pod (pod-spec-builder) and takes
++      // the same exec, after waitForJobPodRunning.
+ 
+       let podName =
+         typeof lease.metadata?.podName === "string" && lease.metadata.podName
+@@ -716,23 +720,34 @@ const plugin = definePlugin({
+ 
+       if (!podAlreadyKnownReady) {
+         try {
+-          await sandboxCrOrchestrator.waitForCompletion(
+-            clients,
+-            namespace,
+-            lease.providerLeaseId,
+-            { timeoutMs: effectiveTimeoutMs, pollMs: 2000 },
+-          );
++          if (leaseBackend === "sandbox-cr") {
++            await sandboxCrOrchestrator.waitForCompletion(
++              clients,
++              namespace,
++              lease.providerLeaseId,
++              { timeoutMs: effectiveTimeoutMs, pollMs: 2000 },
++            );
++          } else {
++            podName = await waitForJobPodRunning(
++              clients,
++              namespace,
++              lease.providerLeaseId,
++              { timeoutMs: effectiveTimeoutMs, pollMs: 2000 },
++            );
++          }
+           readySandboxesByLease.add(lease.providerLeaseId);
+         } catch (err) {
+-          if (err instanceof SandboxCrTimeoutError) {
++          if (err instanceof SandboxCrTimeoutError || err instanceof JobPodTimeoutError) {
+             return {
+               exitCode: null,
+               timedOut: true,
+               stdout: "",
+-              stderr: `Sandbox pod did not become Ready within ${effectiveTimeoutMs}ms`,
++              stderr: err instanceof JobPodTimeoutError
++                ? err.message
++                : `Sandbox pod did not become Ready within ${effectiveTimeoutMs}ms`,
+               metadata: {
+                 provider: "kubernetes",
+-                backend: "sandbox-cr",
++                backend: leaseBackend,
+                 namespace,
+                 sandboxName: lease.providerLeaseId,
+               },
+@@ -744,7 +759,7 @@ const plugin = definePlugin({
+ 
+       // Resolve pod name (may now be populated in Sandbox status).
+       if (!podName) {
+-        podName = await sandboxCrOrchestrator.findPod(
++        podName = await (leaseBackend === "sandbox-cr" ? sandboxCrOrchestrator : jobOrchestrator).findPod(
+           clients,
+           namespace,
+           lease.providerLeaseId,
+@@ -756,10 +771,10 @@ const plugin = definePlugin({
+           exitCode: 1,
+           timedOut: false,
+           stdout: "",
+-          stderr: "Sandbox pod is Ready but podName could not be resolved.",
++          stderr: "The pod is Ready but podName could not be resolved.",
+           metadata: {
+             provider: "kubernetes",
+-            backend: "sandbox-cr",
++            backend: leaseBackend,
+             namespace,
+             sandboxName: lease.providerLeaseId,
+           },
+@@ -790,7 +805,7 @@ const plugin = definePlugin({
+             stderr: "",
+             metadata: {
+               provider: "kubernetes",
+-              backend: "sandbox-cr",
++              backend: leaseBackend,
+               namespace,
+               sandboxName: lease.providerLeaseId,
+               podName,
+@@ -839,7 +854,7 @@ const plugin = definePlugin({
+               stderr: `fast-upload flush failed: ${err instanceof Error ? err.message : String(err)}`,
+               metadata: {
+                 provider: "kubernetes",
+-                backend: "sandbox-cr",
++                backend: leaseBackend,
+                 namespace,
+                 sandboxName: lease.providerLeaseId,
+                 podName,
+@@ -854,7 +869,7 @@ const plugin = definePlugin({
+             stderr: flushResult.stderr,
+             metadata: {
+               provider: "kubernetes",
+-              backend: "sandbox-cr",
++              backend: leaseBackend,
+               namespace,
+               sandboxName: lease.providerLeaseId,
+               podName,
+@@ -909,7 +924,7 @@ const plugin = definePlugin({
+           stderr: appendNetworkEgressDenyHint(err instanceof Error ? err.message : String(err), scopedNetworkEgress),
+           metadata: {
+             provider: "kubernetes",
+-            backend: "sandbox-cr",
++            backend: leaseBackend,
+             namespace,
+             sandboxName: lease.providerLeaseId,
+             podName,
+@@ -924,78 +939,19 @@ const plugin = definePlugin({
+         stderr: appendNetworkEgressDenyHint(execResult.stderr, scopedNetworkEgress),
+         metadata: {
+           provider: "kubernetes",
+-          backend: "sandbox-cr",
++          backend: leaseBackend,
+           namespace,
+           sandboxName: lease.providerLeaseId,
+           podName,
+         },
+       };
+-    } else {
+-      // ── Job backend (legacy / stable fallback) ──────────────────────────────
+-      // The container entrypoint is baked into the Job spec (Tini + paperclip-agent-shim).
+-      // We do NOT re-exec command/args — instead we wait for the Job to finish
+-      // and collect its logs.
+-      //
+-      // params.command / params.args / params.stdin are intentionally ignored.
+-
+-      let status;
+-      let timedOut = false;
+-      try {
+-        status = await jobOrchestrator.waitForCompletion(
+-          clients,
+-          namespace,
+-          lease.providerLeaseId,
+-          { timeoutMs: effectiveTimeoutMs, pollMs: 2000 },
+-        );
+-      } catch (err) {
+-        if (err instanceof JobTimeoutError) {
+-          timedOut = true;
+-          status = null;
+-        } else {
+-          throw err;
+-        }
+-      }
+-
+-      // Collect logs from the pod.
+-      const podName =
+-        typeof lease.metadata?.podName === "string"
+-          ? lease.metadata.podName
+-          : await jobOrchestrator.findPod(
+-              clients,
+-              namespace,
+-              lease.providerLeaseId,
+-            );
+-
+-      const stdoutChunks: string[] = [];
+-      const stderrChunks: string[] = [];
+-
+-      if (podName) {
+-        await jobOrchestrator.streamLogs(
+-          clients,
+-          namespace,
+-          podName,
+-          async (stream, text) => {
+-            if (stream === "stdout") stdoutChunks.push(text);
+-            else stderrChunks.push(text);
+-          },
+-        );
+-      }
+-
+-      return {
+-        exitCode: timedOut ? null : status?.phase === "Succeeded" ? 0 : 1,
+-        timedOut,
+-        stdout: stdoutChunks.join(""),
+-        stderr: appendNetworkEgressDenyHint(stderrChunks.join(""), scopedNetworkEgress),
+-        metadata: {
+-          provider: "kubernetes",
+-          backend: "job",
+-          namespace,
+-          jobName: lease.providerLeaseId,
+-          podName: podName ?? null,
+-          phase: status?.phase ?? null,
+-        },
+-      };
+     }
++    return {
++      exitCode: 1,
++      timedOut: false,
++      stdout: "",
++      stderr: `Unknown Kubernetes sandbox backend: ${String(leaseBackend)}`,
++    };
+   },
+ 
+   // Opt-in native inbound transfer. Defining this hook (with onEnvironmentSyncOut)
+diff --git a/packages/plugins/sandbox-providers/kubernetes/src/pod-spec-builder.ts b/packages/plugins/sandbox-providers/kubernetes/src/pod-spec-builder.ts
+index a2564f0..f30b8c0 100644
+--- a/packages/plugins/sandbox-providers/kubernetes/src/pod-spec-builder.ts
++++ b/packages/plugins/sandbox-providers/kubernetes/src/pod-spec-builder.ts
+@@ -59,7 +59,17 @@ export function buildJobManifest(input: BuildJobManifestInput): Record<string, u
+               name: "agent",
+               image: input.image,
+               imagePullPolicy: "IfNotPresent",
+-              command: ["/usr/bin/tini", "--", "/usr/local/bin/paperclip-agent-shim"],
++              // Alebrije patch 0002: idle like the sandbox-cr pod, and paperclip-server
++              // execs every command into it (onEnvironmentExecute). The shim needs
++              // /run/paperclip/runtime-command.json, which nothing mounts: it exited 2
++              // at once, the Job failed, and every run died at the server's Git probe.
++              command: [
++                "/usr/bin/tini",
++                "--",
++                "/bin/sh",
++                "-c",
++                "sleep infinity",
++              ],
+               // HOME must point at a writable mount; the image's default
+               // HOME is inside the readOnly root filesystem. Agent runtimes
+               // can silently exit with code 0 and no output when HOME is
+diff --git a/packages/plugins/sandbox-providers/kubernetes/src/types.ts b/packages/plugins/sandbox-providers/kubernetes/src/types.ts
+index 5626daa..1edc5d7 100644
+--- a/packages/plugins/sandbox-providers/kubernetes/src/types.ts
++++ b/packages/plugins/sandbox-providers/kubernetes/src/types.ts
+@@ -61,8 +61,10 @@ export const kubernetesProviderConfigSchema = z
+      *   paperclip-server can exec into for multi-command adapter-install workflows.
+      *   Requires the agent-sandbox controller to be installed in the cluster.
+      *
+-     * - `"job"` — uses batch/v1 Job (stable fallback). One-shot entrypoint; does
+-     *   NOT support multi-command exec. Use this for clusters without agent-sandbox
++     * - `"job"` — uses batch/v1 Job (stable fallback). Alebrije patch 0002: its pod
++     *   idles like the Sandbox pod and paperclip-server execs into it, so it supports
++     *   multi-command exec too (upstream's one-shot entrypoint could not run the
++     *   server's per-run Git probe). Use this for clusters without agent-sandbox
+      *   installed, or when you need stable (non-alpha) k8s APIs.
+      */
+     backend: z.enum(["sandbox-cr", "job"]).default("sandbox-cr"),
+diff --git a/packages/plugins/sandbox-providers/kubernetes/test/unit/job-orchestrator.test.ts b/packages/plugins/sandbox-providers/kubernetes/test/unit/job-orchestrator.test.ts
+index f051e6e..738e7c6 100644
+--- a/packages/plugins/sandbox-providers/kubernetes/test/unit/job-orchestrator.test.ts
++++ b/packages/plugins/sandbox-providers/kubernetes/test/unit/job-orchestrator.test.ts
+@@ -1,5 +1,14 @@
+ import { describe, it, expect, vi } from "vitest";
+-import { createJob, deleteJob, getJobStatus, findPodForJob, JobTimeoutError, waitForJobCompletion } from "../../src/job-orchestrator.js";
++import {
++  createJob,
++  deleteJob,
++  getJobStatus,
++  findPodForJob,
++  JobPodTimeoutError,
++  JobTimeoutError,
++  waitForJobCompletion,
++  waitForJobPodRunning,
++} from "../../src/job-orchestrator.js";
+ 
+ describe("createJob", () => {
+   it("calls batch.createNamespacedJob with the manifest", async () => {
+@@ -85,3 +94,108 @@ describe("waitForJobCompletion", () => {
+     ).rejects.toBeInstanceOf(JobTimeoutError);
+   });
+ });
++
++// Alebrije patch 0002: the job backend execs into its idle pod, so execute() first
++// waits for that pod to run.
++describe("waitForJobPodRunning", () => {
++  const runningPod = (name: string) => ({
++    metadata: { name },
++    status: { phase: "Running", containerStatuses: [{ name: "agent", state: { running: {} } }] },
++  });
++
++  it("returns the pod name once the pod is Running with the agent container started", async () => {
++    const clients = {
++      batch: { readNamespacedJobStatus: vi.fn().mockResolvedValue({ status: { active: 1 } }) },
++      core: { listNamespacedPod: vi.fn().mockResolvedValue({ items: [runningPod("r-1-xyz")] }) },
++    };
++    await expect(
++      waitForJobPodRunning(clients as never, "ns", "r-1", { timeoutMs: 1000, pollMs: 10 }),
++    ).resolves.toBe("r-1-xyz");
++    expect(clients.core.listNamespacedPod).toHaveBeenCalledWith(
++      expect.objectContaining({ namespace: "ns", labelSelector: "job-name=r-1" }),
++    );
++  });
++
++  it("keeps polling while the pod waits (image pull, Secret not created yet)", async () => {
++    const waiting = {
++      metadata: { name: "r-1-xyz" },
++      status: {
++        phase: "Pending",
++        containerStatuses: [{ name: "agent", state: { waiting: { reason: "CreateContainerConfigError" } } }],
++      },
++    };
++    const list = vi.fn()
++      .mockResolvedValueOnce({ items: [] })
++      .mockResolvedValueOnce({ items: [waiting] })
++      .mockResolvedValue({ items: [runningPod("r-1-xyz")] });
++    const clients = {
++      batch: { readNamespacedJobStatus: vi.fn().mockResolvedValue({ status: {} }) },
++      core: { listNamespacedPod: list },
++    };
++    await expect(
++      waitForJobPodRunning(clients as never, "ns", "r-1", { timeoutMs: 1000, pollMs: 5 }),
++    ).resolves.toBe("r-1-xyz");
++    expect(list).toHaveBeenCalledTimes(3);
++  });
++
++  it("fails at once when the Job already finished", async () => {
++    const list = vi.fn();
++    const clients = {
++      batch: {
++        readNamespacedJobStatus: vi.fn().mockResolvedValue({
++          status: { failed: 1, conditions: [{ type: "Failed", status: "True", reason: "DeadlineExceeded" }] },
++        }),
++      },
++      core: { listNamespacedPod: list },
++    };
++    await expect(
++      waitForJobPodRunning(clients as never, "ns", "r-1", { timeoutMs: 1000, pollMs: 10 }),
++    ).rejects.toThrow("Job ns/r-1 is Failed (DeadlineExceeded): its pod cannot take an exec");
++    expect(list).not.toHaveBeenCalled();
++  });
++
++  it("fails at once when the agent container terminated (the shim without its spec exited 2)", async () => {
++    const terminated = {
++      metadata: { name: "r-1-xyz" },
++      status: {
++        phase: "Running",
++        containerStatuses: [{ name: "agent", state: { terminated: { exitCode: 2, reason: "Error" } } }],
++      },
++    };
++    const clients = {
++      batch: { readNamespacedJobStatus: vi.fn().mockResolvedValue({ status: { active: 1 } }) },
++      core: { listNamespacedPod: vi.fn().mockResolvedValue({ items: [terminated] }) },
++    };
++    await expect(
++      waitForJobPodRunning(clients as never, "ns", "r-1", { timeoutMs: 1000, pollMs: 10 }),
++    ).rejects.toThrow("Pod ns/r-1-xyz of Job r-1 terminated (exit 2, Error): it cannot take an exec");
++  });
++
++  it("skips a pod that is being deleted", async () => {
++    const deleting = { ...runningPod("r-1-old"), metadata: { name: "r-1-old", deletionTimestamp: "2026-10-13T00:00:00Z" } };
++    const clients = {
++      batch: { readNamespacedJobStatus: vi.fn().mockResolvedValue({ status: { active: 1 } }) },
++      core: { listNamespacedPod: vi.fn().mockResolvedValue({ items: [deleting, runningPod("r-1-new")] }) },
++    };
++    await expect(
++      waitForJobPodRunning(clients as never, "ns", "r-1", { timeoutMs: 1000, pollMs: 10 }),
++    ).resolves.toBe("r-1-new");
++  });
++
++  it("throws JobPodTimeoutError with the last state seen when the pod never runs", async () => {
++    const pulling = {
++      metadata: { name: "r-1-xyz" },
++      status: { phase: "Pending", containerStatuses: [{ name: "agent", state: { waiting: { reason: "ContainerCreating" } } }] },
++    };
++    const clients = {
++      batch: { readNamespacedJobStatus: vi.fn().mockResolvedValue({ status: { active: 1 } }) },
++      core: { listNamespacedPod: vi.fn().mockResolvedValue({ items: [pulling] }) },
++    };
++    const err = await waitForJobPodRunning(clients as never, "ns", "r-1", { timeoutMs: 40, pollMs: 10 })
++      .then(() => null, (e: unknown) => e);
++    expect(err).toBeInstanceOf(JobPodTimeoutError);
++    expect((err as Error).message).toBe(
++      "The pod of Job ns/r-1 was not Running within 40ms (last seen: Pending: ContainerCreating)",
++    );
++  });
++});
+diff --git a/packages/plugins/sandbox-providers/kubernetes/test/unit/plugin-job-execute.test.ts b/packages/plugins/sandbox-providers/kubernetes/test/unit/plugin-job-execute.test.ts
+new file mode 100644
+index 0000000..ec0556b
+--- /dev/null
++++ b/packages/plugins/sandbox-providers/kubernetes/test/unit/plugin-job-execute.test.ts
+@@ -0,0 +1,176 @@
++import { describe, it, expect, vi, beforeEach } from "vitest";
++
++// Alebrije patch 0002: onEnvironmentExecute on the job backend. Upstream ignored
++// command/args/stdin there and only waited for the Job's one-shot entrypoint, so
++// the server's per-run Git probe (`sh -c <probe>`) always got exit 1. The Job's
++// pod now idles and takes the same exec as the Sandbox pod.
++
++// Mock the kube-client module so the plugin handlers run against injected fake
++// API clients (as in plugin-lease-lifecycle.test.ts), and execInPod so no
++// WebSocket is opened. wrapCommandWithEnv stays real.
++const h = vi.hoisted(() => ({ clients: {} as Record<string, unknown> }));
++
++vi.mock("../../src/kube-client.js", () => ({
++  createKubeConfig: vi.fn(() => ({})),
++  makeKubeClients: vi.fn(() => h.clients),
++}));
++
++vi.mock("../../src/pod-exec.js", async (importOriginal) => ({
++  ...(await importOriginal<typeof import("../../src/pod-exec.js")>()),
++  execInPod: vi.fn(),
++}));
++
++import plugin from "../../src/plugin.js";
++import { execInPod } from "../../src/pod-exec.js";
++
++const CONFIG = { inCluster: true, backend: "job" };
++
++function lease(providerLeaseId: string, overrides: Record<string, unknown> = {}) {
++  return {
++    providerLeaseId,
++    metadata: {
++      namespace: "paperclip-acme",
++      jobName: providerLeaseId,
++      podName: null,
++      secretName: `${providerLeaseId}-env`,
++      phase: "Pending",
++      backend: "job",
++      ...overrides,
++    },
++  };
++}
++
++function runningPod(name: string) {
++  return {
++    metadata: { name },
++    status: { phase: "Running", containerStatuses: [{ name: "agent", state: { running: {} } }] },
++  };
++}
++
++function execute(providerLeaseId: string, extra: Record<string, unknown> = {}) {
++  return plugin.definition.onEnvironmentExecute!({
++    driverKey: "kubernetes",
++    companyId: "acme",
++    environmentId: "env-1",
++    config: CONFIG,
++    lease: lease(providerLeaseId),
++    command: "sh",
++    args: ["-c", "printf ok", "paperclip-git-context", "managed"],
++    timeoutMs: 15_000,
++    ...extra,
++  });
++}
++
++beforeEach(() => {
++  h.clients = {};
++  vi.mocked(execInPod).mockReset();
++});
++
++describe("onEnvironmentExecute on the job backend (Alebrije patch 0002)", () => {
++  it("waits for the Job's pod, then execs the command with its args and stdin", async () => {
++    h.clients = {
++      batch: { readNamespacedJobStatus: vi.fn().mockResolvedValue({ status: { active: 1 } }) },
++      core: { listNamespacedPod: vi.fn().mockResolvedValue({ items: [runningPod("pc-a-pod")] }) },
++    };
++    vi.mocked(execInPod).mockResolvedValue({ exitCode: 0, stdout: "ok", stderr: "" });
++
++    const result = await execute("pc-a", { stdin: "input" });
++
++    expect(execInPod).toHaveBeenCalledTimes(1);
++    const [, namespace, podName, container, command, stdin, timeoutMs] = vi.mocked(execInPod).mock.calls[0]!;
++    expect([namespace, podName, container]).toEqual(["paperclip-acme", "pc-a-pod", "agent"]);
++    expect(command).toEqual(["sh", "-c", "printf ok", "paperclip-git-context", "managed"]);
++    expect(stdin).toBe("input");
++    expect(timeoutMs).toBeGreaterThan(0);
++    expect(timeoutMs).toBeLessThanOrEqual(15_000);
++    expect(result).toEqual(
++      expect.objectContaining({
++        exitCode: 0,
++        timedOut: false,
++        stdout: "ok",
++        metadata: expect.objectContaining({ backend: "job", namespace: "paperclip-acme", podName: "pc-a-pod" }),
++      }),
++    );
++  });
++
++  it("passes the run env to the in-pod process", async () => {
++    h.clients = {
++      batch: { readNamespacedJobStatus: vi.fn().mockResolvedValue({ status: { active: 1 } }) },
++      core: { listNamespacedPod: vi.fn().mockResolvedValue({ items: [runningPod("pc-b-pod")] }) },
++    };
++    vi.mocked(execInPod).mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
++
++    await execute("pc-b", { env: { HOME: "/home/paperclip" } });
++
++    const command = vi.mocked(execInPod).mock.calls[0]![4];
++    expect(command).toEqual([
++      "/bin/sh",
++      "-c",
++      "export HOME='/home/paperclip'; exec 'sh' '-c' 'printf ok' 'paperclip-git-context' 'managed'",
++    ]);
++  });
++
++  it("returns the command's own exit code", async () => {
++    h.clients = {
++      batch: { readNamespacedJobStatus: vi.fn().mockResolvedValue({ status: { active: 1 } }) },
++      core: { listNamespacedPod: vi.fn().mockResolvedValue({ items: [runningPod("pc-c-pod")] }) },
++    };
++    vi.mocked(execInPod).mockResolvedValue({ exitCode: 3, stdout: "", stderr: "boom" });
++
++    const result = await execute("pc-c");
++
++    expect(result).toEqual(expect.objectContaining({ exitCode: 3, timedOut: false, stderr: "boom" }));
++  });
++
++  it("waits only on the first exec of a lease", async () => {
++    const readJob = vi.fn().mockResolvedValue({ status: { active: 1 } });
++    const listPods = vi.fn().mockResolvedValue({ items: [runningPod("pc-d-pod")] });
++    h.clients = { batch: { readNamespacedJobStatus: readJob }, core: { listNamespacedPod: listPods } };
++    vi.mocked(execInPod).mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
++
++    await execute("pc-d");
++    await execute("pc-d");
++
++    // First exec: the Job status and its pod. Second: only the pod name lookup.
++    expect(readJob).toHaveBeenCalledTimes(1);
++    expect(listPods).toHaveBeenCalledTimes(2);
++    expect(vi.mocked(execInPod).mock.calls.map((c) => c[2])).toEqual(["pc-d-pod", "pc-d-pod"]);
++  });
++
++  it("fails with the Job's reason when the Job already finished, without an exec", async () => {
++    h.clients = {
++      batch: {
++        readNamespacedJobStatus: vi.fn().mockResolvedValue({
++          status: { failed: 1, conditions: [{ type: "Failed", status: "True", reason: "DeadlineExceeded" }] },
++        }),
++      },
++      core: { listNamespacedPod: vi.fn() },
++    };
++
++    await expect(execute("pc-e")).rejects.toThrow("Job paperclip-acme/pc-e is Failed (DeadlineExceeded)");
++    expect(execInPod).not.toHaveBeenCalled();
++  });
++
++  it("returns timedOut with the pod's last state when it never runs", async () => {
++    const pulling = {
++      metadata: { name: "pc-f-pod" },
++      status: { phase: "Pending", containerStatuses: [{ name: "agent", state: { waiting: { reason: "ContainerCreating" } } }] },
++    };
++    h.clients = {
++      batch: { readNamespacedJobStatus: vi.fn().mockResolvedValue({ status: { active: 1 } }) },
++      core: { listNamespacedPod: vi.fn().mockResolvedValue({ items: [pulling] }) },
++    };
++
++    const result = await execute("pc-f", { timeoutMs: 30 });
++
++    expect(result).toEqual(
++      expect.objectContaining({
++        exitCode: null,
++        timedOut: true,
++        stderr: "The pod of Job paperclip-acme/pc-f was not Running within 30ms (last seen: Pending: ContainerCreating)",
++        metadata: expect.objectContaining({ backend: "job" }),
++      }),
++    );
++    expect(execInPod).not.toHaveBeenCalled();
++  });
++});
+diff --git a/packages/plugins/sandbox-providers/kubernetes/test/unit/pod-spec-builder.test.ts b/packages/plugins/sandbox-providers/kubernetes/test/unit/pod-spec-builder.test.ts
+index 75d1da3..b33cdf2 100644
+--- a/packages/plugins/sandbox-providers/kubernetes/test/unit/pod-spec-builder.test.ts
++++ b/packages/plugins/sandbox-providers/kubernetes/test/unit/pod-spec-builder.test.ts
+@@ -44,10 +44,18 @@ describe("buildJobManifest", () => {
+     expect(container.securityContext.capabilities.drop).toEqual(["ALL"]);
+   });
+ 
+-  it("wraps the entrypoint in tini for PID 1", () => {
++  it("idles the pod under tini so paperclip-server can exec into it (Alebrije patch 0002)", () => {
+     const job = buildJobManifest(baseInput);
+     const container = job.spec.template.spec.containers[0];
+-    expect(container.command).toEqual(["/usr/bin/tini", "--", "/usr/local/bin/paperclip-agent-shim"]);
++    expect(container.command).toEqual([
++      "/usr/bin/tini",
++      "--",
++      "/bin/sh",
++      "-c",
++      "sleep infinity",
++    ]);
++    // The shim needs /run/paperclip/runtime-command.json, which nothing mounts.
++    expect(container.command).not.toContain("/usr/local/bin/paperclip-agent-shim");
+   });
+ 
+   it("declares explicit writable emptyDir mounts for the standard agent paths", () => {
